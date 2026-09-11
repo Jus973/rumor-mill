@@ -14,6 +14,7 @@
  * script works against any deployment.
  */
 
+import { rmSync } from 'node:fs';
 import { publicClient, short, CONTRACT_ADDRESS, EXPLORER, gameIdOf } from './lib/chain.js';
 import type { Hex } from 'viem';
 import { read } from './lib/tx.js';
@@ -37,13 +38,20 @@ const WITHHOLD_SLUG = 'kelce';
 async function main() {
   const now = () => Math.floor(Date.now() / 1000);
 
+  // Sellers persist {claimId, payload, K} to out/ so they can deliver keys and reveal.
+  // Each demo run is self-contained, so start from a clean slate rather than trying to
+  // deliver keys for claims that belong to an earlier run.
+  rmSync('out', { recursive: true, force: true });
+
   const challengeWindow = Number(await read<bigint>(pub, 'challengeWindow'));
   const revealWindow = Number(await read<bigint>(pub, 'revealWindow'));
   const baseBond = await read<bigint>(pub, 'baseBond');
 
   const fixtureFile = loadFixture('fixtures/week1.json');
+  // Demo default: 110s lock. Long enough for ~25 pre-lock txs at Sepolia's ~13s
+  // confirmations, short enough that lock + challenge + reveal fits a 5-minute video.
   const nominalLock = fixtureFile.games[0].lockOffsetSec;
-  const lockOffset = Number(process.env.DEMO_LOCK_SEC ?? nominalLock);
+  const lockOffset = Number(process.env.DEMO_LOCK_SEC ?? 110);
   // Scale FUTURE news offsets with the lock so late-breaking news still lands before the
   // cliff when the lock is shortened. Past news (negative offsets) has already broken.
   const scale = lockOffset / nominalLock;
