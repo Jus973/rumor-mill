@@ -26,6 +26,8 @@ Buyers are those who will use this information for personal benefit
 |---|---|
 | **Contract** | [`0x7a06f5991498A9D40A03D497d31e3ea81c643d5E`](https://sepolia.etherscan.io/address/0x7a06f5991498A9D40A03D497d31e3ea81c643d5E) |
 | **Chain** | Ethereum Sepolia (`11155111`), deploy block `11683458` |
+| **Verified source** | [Sourcify](https://repo.sourcify.dev/11155111/0x7a06f5991498A9D40A03D497d31e3ea81c643d5E) — exact match on creation and runtime bytecode |
+| **Live dashboard** | [`web/`](web) — read-only view of the deployed market, see [Live dashboard](#live-dashboard) |
 
 ### Two flows, one matcher
 
@@ -111,6 +113,25 @@ w   = 0.1 + 0.9 * min(1, hoursBeforeLock / 96)
 Slashed listings and undelivered keys score `ln(0.05) = −2.996`, worse than any honest miss.
 Scoring is off-chain: `ClaimSettled` carries every input, so anyone can recompute the ledger
 from `agents/src/lib/scoring.ts`. Buyers rank listings by it before they can read them.
+
+## Live dashboard
+
+`web/` is a static, read-only page that replays the contract's logs in the browser and
+renders the whole market: the stat line, the seller reputation ledger, every sealed
+listing, every bounty, and each game's attested inactive list. It connects no wallet,
+signs nothing, and has no backend — it is a Vite build over a public Sepolia RPC.
+
+It imports `indexMarket` and the scorer directly from `agents/src/lib`, so the page and
+the CLI agents cannot drift apart: one indexer, one definition of every number.
+
+```bash
+cd web && npm install && npm run dev      # http://localhost:5173
+npm run build                             # static bundle in web/dist
+```
+
+Deploying is a static-host drop. `vercel.json` at the repo root already points Vercel at
+`web/`; any host that can serve `web/dist` works the same way. Set `VITE_RPC_URL` at build
+time to use a dedicated RPC instead of the public endpoint.
 
 ## Running the demo
 
