@@ -2,7 +2,7 @@
  * enums.ts — the on-chain enums, mirrored once.
  *
  * Ordering is part of the ABI: these integers are what `ClaimSettled` carries and what
- * `abi.encode` commits to. SealedAvailabilityMarket.sol §3.1 is the source of truth.
+ * `abi.encode` commits to. SealedAvailabilityMarket.sol is the source of truth.
  */
 
 export enum ReportTag {
@@ -34,12 +34,18 @@ export enum Bucket {
 }
 
 export enum ClaimState {
-  Committed = 0,
-  Purchased = 1,
+  Listed = 0,
+  Revealed = 1,
+  SettledCorrect = 2,
+  SettledWrong = 3,
+  Slashed = 4,
+  Unwound = 5,
+}
+
+export enum PurchaseState {
+  None = 0,
+  Paid = 1,
   KeyDelivered = 2,
-  Revealed = 3,
-  SettledCorrect = 4,
-  SettledWrong = 5,
-  Slashed = 6,
-  RefundedUndelivered = 7,
+  Refunded = 3,
+  Resolved = 4,
 }

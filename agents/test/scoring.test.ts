@@ -32,7 +32,7 @@ function settled(over: Partial<SettledEvent> = {}): SettledEvent {
     committedAt: LOCK, // late by default -> w = 0.1
     lockTime: LOCK,
     bond: 10n,
-    escrowReleased: 0n,
+    payoutBps: 0,
     ...over,
   };
 }

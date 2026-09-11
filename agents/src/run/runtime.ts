@@ -150,9 +150,7 @@ export async function runAgent(opts: AgentOptions): Promise<void> {
   }
 }
 
-/** Only this run's claims — the contract accumulates across runs. */
-export function inRun(state: MarketState, fixture: ResolvedFixture, bountyId: number): boolean {
-  const b = state.bounties.get(bountyId);
-  if (!b) return false;
-  return fixture.games.some((g) => g.gameId === b.gameId);
+/** Only this run's games — the contract accumulates across runs. */
+export function inRun(fixture: ResolvedFixture, gameId: `0x${string}`): boolean {
+  return fixture.games.some((g) => g.gameId === gameId);
 }

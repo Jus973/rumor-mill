@@ -30,6 +30,8 @@ contract Deploy is Script {
         // How long the market waits on a silent operator before anyone may unwind the game
         // and return every bond and escrow. Demo: 120s. Production story: ~7 days.
         uint64 unwindDelay = uint64(vm.envOr("UNWIND_DELAY", uint256(120)));
+        // Lead time at which the price multiplier saturates. Demo: 120s. Production: 96h.
+        uint64 leadSaturation = uint64(vm.envOr("LEAD_SATURATION", uint256(120)));
         address burnSink = vm.envOr("BURN_SINK", address(0x000000000000000000000000000000000000dEaD));
         // Operator take rate on the reveal fee (outcome-independent). 250 bps = 2.5%.
         uint16 protocolFeeBps = uint16(vm.envOr("PROTOCOL_FEE_BPS", uint256(250)));
@@ -42,7 +44,7 @@ contract Deploy is Script {
         vm.startBroadcast(pk);
         SealedAvailabilityMarket market = new SealedAvailabilityMarket(
             deployer, attester, deployer, burnSink, deployer, protocolFeeBps, baseBond,
-            challengeWindow, revealWindow, unwindDelay
+            challengeWindow, revealWindow, unwindDelay, leadSaturation
         );
         vm.stopBroadcast();
 
@@ -60,6 +62,7 @@ contract Deploy is Script {
         console.log("challengeWindow (s):    ", challengeWindow);
         console.log("revealWindow (s):       ", revealWindow);
         console.log("unwindDelay (s):        ", unwindDelay);
+        console.log("leadSaturation (s):     ", leadSaturation);
         console.log("=====================================================");
     }
 }

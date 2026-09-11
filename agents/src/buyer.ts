@@ -1,9 +1,9 @@
 /**
- * buyer.ts — the lineup optimizer (LLD §4.4).
+ * buyer.ts — the lineup optimizer.
  *
- * Posts bounties on the slots it is uncertain about, buys the best-rated sealed claims
- * before lock, decrypts them, verifies each against its on-chain commitment, and pools
- * them with the public prior into a single START/BENCH decision.
+ * Posts bounties (bids) on the slots it is uncertain about, SEARCHES the listings that
+ * answer them, buys the best-rated ones before lock, decrypts them, verifies each against
+ * its on-chain commitment, and pools them with the public prior into a START/BENCH call.
  *
  * Verification is the point: decrypting is not trusting. A payload that does not rehash to
  * the committed hash is discarded and its seller blacklisted for the run.
@@ -18,12 +18,22 @@ import { act, info } from './lib/log.js';
 import { Outcome, Bucket, ReportTag } from './lib/enums.js';
 import { openClaim } from './lib/crypto.js';
 import { BUCKET_MID, priorPActive, ensembleWeight, type SellerLedger } from './lib/scoring.js';
-import { indexMarket, claimsForBounty, priorKey, type MarketState } from './lib/indexer.js';
+import {
+  indexMarket,
+  offersForBounty,
+  claimsFor,
+  priorKey,
+  isTerminal,
+  purchaseBy,
+  type MarketState,
+  type IndexedClaim,
+} from './lib/indexer.js';
 import { fmt } from './lib/seller.js';
 import type { ResolvedFixture, ResolvedPlayer } from './lib/fixtures.js';
 
-export const REVEAL_FEE = 100_000_000_000_000n; // 0.0001 ETH
-export const CONTINGENT = 400_000_000_000_000n; // 0.0004 ETH
+/** The buyer's budget per slot. A listing whose ask exceeds either leg is not shown. */
+export const MAX_REVEAL_FEE = BigInt(process.env.MAX_REVEAL_FEE ?? '200000000000000'); // 0.0002 ETH
+export const MAX_CONTINGENT = BigInt(process.env.MAX_CONTINGENT ?? '800000000000000'); // 0.0008 ETH
 
 export interface OpenedClaim {
   claimId: number;
@@ -61,11 +71,10 @@ export class Buyer {
   }
 
   /**
-   * Register the ECIES pubkey AND post a bounty on every uncertain slot
-   * (prior tag ∈ {QUESTIONABLE, DOUBTFUL}) in a single block. These are independent, and
-   * the lock cliff leaves no room for serial confirmations.
+   * Register the ECIES pubkey AND post a bid on every uncertain slot
+   * (prior tag ∈ {QUESTIONABLE, DOUBTFUL}) in a single block.
    */
-  async registerAndPostBounties() {
+  async registerAndPostBounties(only?: ResolvedPlayer[]) {
     const pubKey = buyerEncKeys().publicKey;
     const existing = await read<Hex>(this.pub, 'encPubKeys', [this.address]);
     const needsKey = !existing || existing === '0x';
@@ -73,7 +82,11 @@ export class Buyer {
     const slots: Array<{ gameId: Hex; player: ResolvedPlayer }> = [];
     for (const g of this.fixture.games) {
       for (const p of g.players) {
-        if (p.priorTag !== ReportTag.QUESTIONABLE && p.priorTag !== ReportTag.DOUBTFUL) continue;
+        if (only) {
+          if (!only.some((x) => x.playerId === p.playerId)) continue;
+        } else if (p.priorTag !== ReportTag.QUESTIONABLE && p.priorTag !== ReportTag.DOUBTFUL) {
+          continue;
+        }
         slots.push({ gameId: g.gameId, player: p });
       }
     }
@@ -82,9 +95,10 @@ export class Buyer {
       ...(needsKey ? [{ functionName: 'registerEncPubKey', args: [pubKey] as const }] : []),
       ...slots.map((s) => ({
         functionName: 'postBounty',
-        args: [s.gameId, s.player.playerId, REVEAL_FEE, CONTINGENT] as const,
+        args: [s.gameId, s.player.playerId, MAX_REVEAL_FEE, MAX_CONTINGENT] as const,
       })),
     ];
+    if (batch.length === 0) return;
     const results = await sendBatch(this.pub, this.wallet, batch as never);
 
     let i = 0;
@@ -103,10 +117,10 @@ export class Buyer {
         gameId: s.gameId,
         playerId: s.player.playerId,
         player: s.player.name,
-        revealFeeWei: REVEAL_FEE.toString(),
-        contingentWei: CONTINGENT.toString(),
+        maxRevealFeeWei: MAX_REVEAL_FEE.toString(),
+        maxContingentWei: MAX_CONTINGENT.toString(),
       });
-      act('BUYER', `postBounty#${bountyId} ${s.player.slug} (${s.player.prior.tag}/${s.player.prior.practice}) fee=${fmt(REVEAL_FEE)} escrow=${fmt(CONTINGENT)}`, results[i].hash);
+      act('BUYER', `postBounty#${bountyId} ${s.player.slug} (${s.player.prior.tag}/${s.player.prior.practice}) budget ≤ ${fmt(MAX_REVEAL_FEE)}+${fmt(MAX_CONTINGENT)}`, results[i].hash);
       i++;
     }
 
@@ -133,47 +147,53 @@ export class Buyer {
     if (!this.bounties.has(bountyId)) this.bounties.set(bountyId, { gameId, playerId, player });
   }
 
-  /** Buy one specific claim, for the interactive terminal. */
-  async purchaseOne(state: MarketState, claimId: number) {
-    const c = state.claims.get(claimId);
-    if (!c) throw new Error(`no claim #${claimId}`);
-    if (c.purchased) throw new Error(`claim #${claimId} is already sold`);
-    const b = state.bounties.get(c.bountyId);
-    if (!b) throw new Error(`claim #${claimId} has no bounty`);
-    if (b.buyer.toLowerCase() !== this.address.toLowerCase()) throw new Error('not your bounty');
-
-    const { hash } = await send(this.pub, this.wallet, {
-      functionName: 'purchase',
-      args: [BigInt(claimId)],
-      value: b.revealFee + b.contingent,
-    });
-    this.purchased.add(claimId);
-    act('BUYER', `purchase claim#${claimId} from ${short(c.seller)} — content still sealed`, hash);
-  }
-
   bountyIds(): number[] {
     return [...this.bounties.keys()];
   }
 
+  /** Listings that answer one of my bids and that I have not bought. */
+  offers(state: MarketState, bountyId: number): IndexedClaim[] {
+    return offersForBounty(state, bountyId).filter(
+      (c) =>
+        !isTerminal(c) &&
+        !c.revealed &&
+        !purchaseBy(c, this.address) &&
+        !this.blacklist.has(c.seller.toLowerCase()) &&
+        c.seller.toLowerCase() !== this.address.toLowerCase(),
+    );
+  }
+
+  /** Buy one specific listing at its ask, for the interactive terminal. */
+  async purchaseOne(state: MarketState, claimId: number) {
+    const c = state.claims.get(claimId);
+    if (!c) throw new Error(`no claim #${claimId}`);
+    if (purchaseBy(c, this.address)) throw new Error(`you already bought claim #${claimId}`);
+    const { hash } = await send(this.pub, this.wallet, {
+      functionName: 'purchase',
+      args: [BigInt(claimId)],
+      value: c.askRevealFee + c.askContingent,
+    });
+    this.purchased.add(claimId);
+    act('BUYER', `purchase claim#${claimId} from ${short(c.seller)} for ${fmt(c.askRevealFee + c.askContingent)} — content still sealed`, hash);
+  }
+
   /**
-   * Buy the top-k claims per slot, ranked by the seller's ledger score. Reputation is the
+   * Buy the top-k listings per bid, ranked by the seller's ledger score. Reputation is the
    * only signal available pre-purchase: the claim itself is sealed.
    */
   async purchaseTopK(state: MarketState, k = 2) {
-    const picks: ReturnType<typeof claimsForBounty> = [];
+    const picks: IndexedClaim[] = [];
+    const seen = new Set<number>();
     for (const [bountyId, b] of this.bounties) {
-      const candidates = claimsForBounty(state, bountyId).filter(
-        (c) => !c.purchased && !this.blacklist.has(c.seller.toLowerCase()),
-      );
+      const candidates = this.offers(state, bountyId).filter((c) => !seen.has(c.claimId));
       if (candidates.length === 0) continue;
-
       const ranked = candidates.sort((x, y) => scoreOf(state.ledger, y.seller) - scoreOf(state.ledger, x.seller));
       const take = ranked.slice(0, k);
-      info(
-        `BUYER bounty#${bountyId} ${b.player.slug}: ${candidates.length} sealed claim(s), buying top ${take.length} by ledger score`,
-      );
-
-      for (const c of take) picks.push(c);
+      info(`BUYER bounty#${bountyId} ${b.player.slug}: ${candidates.length} matching listing(s), buying top ${take.length} by ledger score`);
+      for (const c of take) {
+        picks.push(c);
+        seen.add(c.claimId);
+      }
     }
 
     if (picks.length === 0) return;
@@ -183,12 +203,12 @@ export class Buyer {
       picks.map((c) => ({
         functionName: 'purchase',
         args: [BigInt(c.claimId)],
-        value: REVEAL_FEE + CONTINGENT,
+        value: c.askRevealFee + c.askContingent,
       })),
     );
     picks.forEach((c, i) => {
       this.purchased.add(c.claimId);
-      act('BUYER', `purchase claim#${c.claimId} from ${short(c.seller)} (rep ${scoreOf(state.ledger, c.seller).toFixed(2)}) — content still sealed`, results[i].hash);
+      act('BUYER', `purchase claim#${c.claimId} from ${short(c.seller)} (rep ${scoreOf(state.ledger, c.seller).toFixed(2)}) for ${fmt(c.askRevealFee + c.askContingent)} — content still sealed`, results[i].hash);
     });
   }
 
@@ -196,17 +216,18 @@ export class Buyer {
   openDelivered(state: MarketState): OpenedClaim[] {
     const out: OpenedClaim[] = [];
     const { privateKey } = buyerEncKeys();
+    const mySlots = new Set([...this.bounties.values()].map((b) => priorKey(b.gameId, b.playerId)));
 
     for (const c of state.claims.values()) {
-      if (!c.encKey || this.opened.has(c.claimId)) continue;
-      if (c.buyer?.toLowerCase() !== this.address.toLowerCase()) continue;
-      // Only this run's bounties — the contract may carry claims from earlier demo runs.
-      if (!this.bounties.has(c.bountyId)) continue;
+      const p = purchaseBy(c, this.address);
+      if (!p || !p.encKey || this.opened.has(c.claimId)) continue;
+      // Only this run's slots — the contract may carry claims from earlier demo runs.
+      if (!mySlots.has(priorKey(c.gameId, c.playerId))) continue;
 
       try {
         const { payload, verified } = openClaim({
           buyerPrivKey: privateKey,
-          encKey: hexToBytes(c.encKey),
+          encKey: hexToBytes(p.encKey),
           ciphertext: hexToBytes(c.ciphertext),
           commitHash: c.commitHash,
         });
@@ -219,7 +240,6 @@ export class Buyer {
           verified,
         };
         if (!verified) {
-          // Payload does not match what was committed before lock — do not count it.
           this.blacklist.add(c.seller.toLowerCase());
           act('BUYER', `claim#${c.claimId} COMMIT MISMATCH — discarded, seller ${short(c.seller)} blacklisted`);
         } else {
@@ -228,8 +248,8 @@ export class Buyer {
         }
         this.opened.set(c.claimId, rec);
         out.push(rec);
-      } catch (err) {
-        // Garbage key: loss is bounded to the reveal fee (§3.6 residual hole).
+      } catch {
+        // Garbage key: loss is bounded to the reveal fee.
         this.blacklist.add(c.seller.toLowerCase());
         act('BUYER', `claim#${c.claimId} KEY FAILED TO DECRYPT — seller ${short(c.seller)} blacklisted (loss bounded to reveal fee)`);
       }
@@ -244,7 +264,7 @@ export class Buyer {
   ensemble(state: MarketState): SlotDecision[] {
     const decisions: SlotDecision[] = [];
 
-    for (const [bountyId, b] of this.bounties) {
+    for (const b of this.bounties.values()) {
       const prior = state.priors.get(priorKey(b.gameId, b.playerId));
       const p0 = prior ? priorPActive(prior.tag, prior.practice) : 0.5;
 
@@ -254,7 +274,7 @@ export class Buyer {
       let wSum = 1;
       let lSum = logit(p0);
 
-      for (const c of claimsForBounty(state, bountyId)) {
+      for (const c of claimsFor(state, b.gameId, b.playerId)) {
         const opened = this.opened.get(c.claimId);
         if (!opened || !opened.verified) continue;
         const q = BUCKET_MID[opened.bucket];
@@ -282,25 +302,50 @@ export class Buyer {
     return decisions;
   }
 
-  /** After lock: any purchased claim with no key refunds the fee AND the escrow. */
+  /** My purchases on this run's slots. */
+  myPurchases(state: MarketState): IndexedClaim[] {
+    const mySlots = new Set([...this.bounties.values()].map((b) => priorKey(b.gameId, b.playerId)));
+    return [...state.claims.values()].filter(
+      (c) => purchaseBy(c, this.address) && mySlots.has(priorKey(c.gameId, c.playerId)),
+    );
+  }
+
+  /** After lock: any purchase with no key refunds the fee AND the escrow. */
   async refundUndelivered(state: MarketState) {
-    for (const claimId of this.purchased) {
-      const c = state.claims.get(claimId);
-      if (!c || c.encKey || c.refunded) continue;
+    for (const c of this.myPurchases(state)) {
+      const p = purchaseBy(c, this.address)!;
+      if (p.encKey || p.refunded || p.resolved) continue;
       const { hash } = await send(this.pub, this.wallet, {
         functionName: 'refundUndelivered',
-        args: [BigInt(claimId)],
+        args: [BigInt(c.claimId)],
       });
-      act('BUYER', `refundUndelivered claim#${claimId} — no key before lock, bond burned`, hash);
+      act('BUYER', `refundUndelivered claim#${c.claimId} — no key before lock, fee + escrow back`, hash);
     }
   }
 
+  /** Crank `resolvePurchase` on my purchases of settled listings, reclaiming escrow. */
+  async resolveAll(state: MarketState) {
+    const todo = this.myPurchases(state).filter((c) => {
+      const p = purchaseBy(c, this.address)!;
+      return isTerminal(c) && !p.refunded && !p.resolved;
+    });
+    if (todo.length === 0) return;
+    const results = await sendBatch(
+      this.pub,
+      this.wallet,
+      todo.map((c) => ({ functionName: 'resolvePurchase', args: [BigInt(c.claimId), this.address] })),
+    );
+    todo.forEach((c, i) => act('BUYER', `resolvePurchase claim#${c.claimId}`, results[i].hash));
+  }
+
   /** Demonstrate the lock cliff: a purchase attempted at/after lock must revert. */
-  async attemptLatePurchase(claimId: number): Promise<string | null> {
+  async attemptLatePurchase(state: MarketState, claimId: number): Promise<string | null> {
+    const c = state.claims.get(claimId);
+    if (!c) return null;
     const r = await expectRevert(this.pub, this.wallet, {
       functionName: 'purchase',
       args: [BigInt(claimId)],
-      value: REVEAL_FEE + CONTINGENT,
+      value: c.askRevealFee + c.askContingent,
     });
     return r.reverted ? r.reason : null;
   }
@@ -313,7 +358,7 @@ export class Buyer {
   }
 }
 
-function scoreOf(l: Map<string, SellerLedger>, seller: string): number {
+export function scoreOf(l: Map<string, SellerLedger>, seller: string): number {
   return l.get(seller.toLowerCase())?.score ?? 0;
 }
 
