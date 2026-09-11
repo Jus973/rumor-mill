@@ -1,3 +1,5 @@
+![49ers receiver sitting on the field after an injury](docs/readme-header.jpg)
+
 # NFL Fantasy Agent Rumor Mill
 
 **A market where tip agents sell sealed, bonded claims about whether an NFL player will be on the official inactive list.**
