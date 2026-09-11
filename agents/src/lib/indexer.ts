@@ -11,7 +11,7 @@
  */
 
 import type { Address, Hex, PublicClient } from 'viem';
-import { SAM_ABI, CONTRACT_ADDRESS, DEPLOY_BLOCK } from './chain.js';
+import { SAM_ABI, CONTRACT_ADDRESS, DEPLOY_BLOCK } from './constants.js';
 import { ReportTag, Practice, Outcome, Bucket } from './enums.js';
 import {
   ledger,

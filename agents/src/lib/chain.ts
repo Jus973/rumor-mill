@@ -14,33 +14,21 @@ import {
   type PublicClient,
   type WalletClient,
 } from 'viem';
-import { sepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { readFileSync, existsSync } from 'node:fs';
 import './env.js'; // side effect: populates process.env from .env if not already set
-import { SAM_ABI } from './abi.js';
-
-export { SAM_ABI };
+import { SAM_ABI, CONTRACT_ADDRESS, DEPLOY_BLOCK, CHAIN, EXPLORER } from './constants.js';
 
 // ---------------------------------------------------------------------------
 // Deployment (LLD §8 step 2)
 // ---------------------------------------------------------------------------
 
 /**
- * Deployed on Ethereum Sepolia, NOT Base Sepolia as the LLD assumed (A1): Base faucets
- * were dry, so the fallback chain in A1 was taken.
+ * The deployment facts moved to constants.ts so the web dashboard can import the
+ * indexer without dragging in node:fs and the private-key loader. Re-exported here
+ * so every existing `from './chain.js'` import keeps working.
  */
-export const CONTRACT_ADDRESS: Address = '0x7a06f5991498A9D40A03D497d31e3ea81c643d5E';
-
-/**
- * The block the contract was mined in. Taken from the broadcast receipt, not from the
- * script's console.log — that one runs during simulation and is one block early, which
- * would make getLogs miss the deployment block.
- */
-export const DEPLOY_BLOCK = 11683458n;
-
-export const CHAIN = sepolia;
-export const EXPLORER = `https://sepolia.etherscan.io/address/${CONTRACT_ADDRESS}`;
+export { SAM_ABI, CONTRACT_ADDRESS, DEPLOY_BLOCK, CHAIN, EXPLORER };
 
 export function rpcUrl(): string {
   const url = process.env.SEPOLIA_RPC_URL;
