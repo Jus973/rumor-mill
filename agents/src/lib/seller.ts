@@ -49,6 +49,7 @@ interface StoredClaim {
 export class Seller {
   private store = new Map<number, StoredClaim>();
   private delivered = new Set<number>();
+  private missed = new Set<number>();
   private revealed = new Set<number>();
 
   constructor(
@@ -208,18 +209,35 @@ export class Seller {
   }
 
   /** Deliver ECIES(buyerPubKey, K) for every purchased claim. This is the sale. */
-  async deliverKeys(state: MarketState) {
+  async deliverKeys(state: MarketState, nowSec = Math.floor(Date.now() / 1000)) {
     const pending: Array<{ claimId: number; encKey: Uint8Array }> = [];
     for (const [claimId, stored] of this.store) {
       if (this.delivered.has(claimId)) continue;
       const c = state.claims.get(claimId);
       if (!c || !c.purchased || c.encKey) continue;
 
+      const b = state.bounties.get(c.bountyId);
+      if (!b) continue;
       const buyerPub = state.encPubKeys.get(c.buyer!);
       if (!buyerPub) {
         info(`${this.name} cannot deliver claim#${claimId}: buyer has no registered pubkey`);
         continue;
       }
+      // deliverKey reverts once the game locks. A claim filled close to the cliff can be
+      // bought and still miss its delivery window — the buyer then reclaims fee AND escrow
+      // via refundUndelivered, and this seller's bond burns. Skip rather than revert.
+      const g = state.games.get(b.gameId);
+      if (g && nowSec >= g.lockTime) {
+        if (!this.missed.has(claimId)) {
+          this.missed.add(claimId);
+          info(
+            `${this.name} MISSED the delivery window on claim#${claimId} — filled too close to lock. ` +
+              `Buyer will be refunded; this bond burns.`,
+          );
+        }
+        continue;
+      }
+
       pending.push({ claimId, encKey: wrapKeyForBuyer(buyerPub, hexToBytes(stored.key)) });
     }
     if (pending.length === 0) return;
@@ -248,6 +266,9 @@ export class Seller {
       if (this.revealed.has(claimId)) continue;
       const c = state.claims.get(claimId);
       if (!c || c.revealed || c.slashed || c.refunded) continue;
+      // Purchased but never delivered: the claim is stuck in `Purchased`, which `reveal`
+      // rejects. Its resolution is refundUndelivered by the buyer, not a reveal by us.
+      if (c.purchased && !c.encKey) continue;
 
       const player = playerOf(stored.bountyId);
       if (player && this.withholdReveal({ bountyId: stored.bountyId, player })) {
