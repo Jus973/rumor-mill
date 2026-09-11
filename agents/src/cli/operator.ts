@@ -14,8 +14,10 @@
  * how you make a seller right or wrong on camera.
  */
 
-import { publicClient, resolverAccount, schedulerWallet, short } from '../lib/chain.js';
-import { read, send, sendBatch } from '../lib/tx.js';
+import { resolverAccount, schedulerWallet, short } from '../lib/chain.js';
+import { read, send } from '../lib/tx.js';
+import { settleAndResolve, slashStale } from '../lib/crank.js';
+import { setT0 } from '../lib/log.js';
 import { fmt } from '../lib/seller.js';
 import { makeResolver } from '../resolver.js';
 import { loadFixture, resolveFixture, inactiveListFor } from '../lib/fixtures.js';
@@ -62,7 +64,9 @@ const commands: Command[] = [
           for (const n of p.news) if (n.tsOffsetSec > 0) n.tsOffsetSec = Math.round(n.tsOffsetSec * scale);
         }
       }
-      const fixture = resolveFixture(file, await chainTime(ctx.pub));
+      const t0 = await chainTime(ctx.pub);
+      setT0(t0);
+      const fixture = resolveFixture(file, t0);
       const r = makeResolver(fixture);
       console.log(C.dim(`publishing season ${file.season} week ${week}, lock in ${LOCK_SEC}s`));
       await r.createGames();
@@ -157,17 +161,13 @@ const commands: Command[] = [
   {
     name: 'settle',
     usage: 'settle',
-    help: 'crank settlement for every revealed claim that is final',
+    help: 'crank settlement: settle every revealed listing, then pay out every purchase',
     run: async (ctx) => {
       if (!ctx.fixture) throw new Error('no slate');
       const ids = new Set(ctx.fixture.games.map((g) => g.gameId));
-      const todo = [...ctx.state.claims.values()].filter((c) => {
-        const b = ctx.state.bounties.get(c.bountyId);
-        return b && ids.has(b.gameId) && c.revealed && !c.settled && !c.slashed && !c.refunded;
-      });
-      if (todo.length === 0) return console.log(C.dim('  nothing revealed-and-final to settle'));
-      const res = await sendBatch(ctx.pub, schedulerWallet(), todo.map((c) => ({ functionName: 'settle', args: [BigInt(c.claimId)] })));
-      todo.forEach((c, i) => console.log(`  ${C.green('✓')} settled claim#${c.claimId}  ${C.dim(res[i].hash)}`));
+      const r = await settleAndResolve(ctx.pub, schedulerWallet(), ctx.state, (c) => ids.has(c.gameId), 'OPERATOR');
+      if (r.settled === 0 && r.resolved === 0) console.log(C.dim('  nothing revealed-and-final to settle'));
+      else console.log(C.dim(`  ${r.settled} listing(s) settled, ${r.resolved} purchase(s) paid out — correct sellers earn lead time × surprise of each escrow`));
     },
   },
   {
@@ -177,19 +177,9 @@ const commands: Command[] = [
     run: async (ctx) => {
       if (!ctx.fixture) throw new Error('no slate');
       const ids = new Set(ctx.fixture.games.map((g) => g.gameId));
-      const todo = [...ctx.state.claims.values()].filter((c) => {
-        const b = ctx.state.bounties.get(c.bountyId);
-        return b && ids.has(b.gameId) && !c.revealed && !c.settled && !c.slashed && !c.refunded;
-      });
-      if (todo.length === 0) return console.log(C.dim('  nothing to slash'));
-      for (const c of todo) {
-        try {
-          const { hash } = await send(ctx.pub, schedulerWallet(), { functionName: 'slashUnrevealed', args: [BigInt(c.claimId)] });
-          console.log(`  ${C.green('✓')} slashed claim#${c.claimId} — bond burned  ${C.dim(hash)}`);
-        } catch (e) {
-          console.log(C.dim(`  claim#${c.claimId} not slashable yet (reveal window still open)`));
-        }
-      }
+      const done = await slashStale(ctx.pub, schedulerWallet(), ctx.state, (c) => ids.has(c.gameId), ctx.chainNow, 'OPERATOR');
+      if (done.length === 0) console.log(C.dim('  nothing slashable yet (reveal window still open, or nothing unrevealed)'));
+      else await settleAndResolve(ctx.pub, schedulerWallet(), ctx.state, (c) => done.includes(c.claimId), 'OPERATOR');
     },
   },
   {
@@ -200,13 +190,15 @@ const commands: Command[] = [
       const [g] = gameByToken(ctx, gameTok);
       const { hash } = await send(ctx.pub, schedulerWallet(), { functionName: 'forceUnwind', args: [g.gameId] });
       console.log(`  ${C.green('✓')} ${g.label} unwound (permissionless — anyone could have done this)  ${C.dim(hash)}`);
-      const ids = [...ctx.state.claims.values()].filter((c) => ctx.state.bounties.get(c.bountyId)?.gameId === g.gameId);
+      const ids = [...ctx.state.claims.values()].filter((c) => c.gameId === g.gameId);
       for (const c of ids) {
         try {
           await send(ctx.pub, schedulerWallet(), { functionName: 'unwindClaim', args: [BigInt(c.claimId)] });
-          console.log(`  ${C.green('✓')} claim#${c.claimId} unwound — bond to seller, escrow to buyer, nothing burned`);
+          console.log(`  ${C.green('✓')} claim#${c.claimId} unwound — bond to seller, nothing burned`);
         } catch { /* already terminal */ }
       }
+      const fresh = await (await import('../lib/indexer.js')).indexMarket(ctx.pub);
+      await settleAndResolve(ctx.pub, schedulerWallet(), fresh, (c) => c.gameId === g.gameId, 'OPERATOR');
     },
   },
   {
@@ -242,15 +234,16 @@ const commands: Command[] = [
         }
       }
       const ids = new Set(ctx.fixture.games.map((g) => g.gameId));
-      const claims = [...ctx.state.claims.values()].filter((c) => ids.has(ctx.state.bounties.get(c.bountyId)?.gameId ?? '0x'));
-      console.log(`\n  ${claims.length} claim(s) on this slate`);
+      const bids = [...ctx.state.bounties.values()].filter((b) => ids.has(b.gameId) && !b.cancelled);
+      console.log(`\n  ${bids.length} open bid(s) on this slate`);
+      const claims = [...ctx.state.claims.values()].filter((c) => ids.has(c.gameId));
+      console.log(`  ${claims.length} listing(s) on this slate`);
       for (const c of claims) {
-        const b = ctx.state.bounties.get(c.bountyId)!;
-        const p = ctx.fixture.games.flatMap((g) => g.players).find((x) => x.playerId === b.playerId);
-        const state = c.slashed ? C.red('SLASHED') : c.refunded ? C.yellow('REFUNDED')
-          : c.settled ? (c.settled.correct ? C.green('CORRECT') : C.red('WRONG'))
-          : c.revealed ? `revealed ${Outcome[c.revealed.claimed]}` : c.encKey ? C.dim('sold, sealed') : c.purchased ? C.dim('bought, no key') : C.dim('sealed, unsold');
-        console.log(`    #${String(c.claimId).padEnd(4)} ${short(c.seller)} ${(p?.slug ?? '?').padEnd(7)} bond=${fmt(c.bond)}  ${state}`);
+        const p = ctx.fixture.games.flatMap((g) => g.players).find((x) => x.playerId === c.playerId);
+        const state = c.slashed ? C.red('SLASHED') : c.unwound ? C.yellow('UNWOUND')
+          : c.settled ? (c.settled.correct ? C.green(`CORRECT (${(c.settled.payoutBps / 100).toFixed(0)}% payout)`) : C.red('WRONG'))
+          : c.revealed ? `revealed ${Outcome[c.revealed.claimed]}` : C.dim(`sealed, ${c.purchases.size} buyer(s)`);
+        console.log(`    #${String(c.claimId).padEnd(4)} ${short(c.seller)} ${(p?.slug ?? '?').padEnd(7)} bond=${fmt(c.bond)} ask=${fmt(c.askRevealFee + c.askContingent)}  ${state}`);
       }
       const bal = await read<bigint>(ctx.pub, 'balances', [me.address]);
       console.log(`\n  operator fees accrued: ${fmt(bal)} (${Number(feeBps) / 100}% of each reveal fee)\n`);

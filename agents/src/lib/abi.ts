@@ -56,6 +56,11 @@ export const SAM_ABI = [
         "name": "_unwindDelay",
         "type": "uint64",
         "internalType": "uint64"
+      },
+      {
+        "name": "_leadSaturation",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "nonpayable"
@@ -174,14 +179,19 @@ export const SAM_ABI = [
         "internalType": "bytes32"
       },
       {
-        "name": "revealFee",
+        "name": "maxRevealFee",
         "type": "uint96",
         "internalType": "uint96"
       },
       {
-        "name": "contingent",
+        "name": "maxContingent",
         "type": "uint96",
         "internalType": "uint96"
+      },
+      {
+        "name": "cancelled",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "view"
@@ -198,6 +208,19 @@ export const SAM_ABI = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "cancelBounty",
+    "inputs": [
+      {
+        "name": "bountyId",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -224,14 +247,19 @@ export const SAM_ABI = [
     ],
     "outputs": [
       {
-        "name": "bountyId",
-        "type": "uint64",
-        "internalType": "uint64"
-      },
-      {
         "name": "seller",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "gameId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "playerId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       },
       {
         "name": "commitHash",
@@ -249,7 +277,12 @@ export const SAM_ABI = [
         "internalType": "uint96"
       },
       {
-        "name": "escrow",
+        "name": "askRevealFee",
+        "type": "uint96",
+        "internalType": "uint96"
+      },
+      {
+        "name": "askContingent",
         "type": "uint96",
         "internalType": "uint96"
       },
@@ -257,6 +290,16 @@ export const SAM_ABI = [
         "name": "committedAt",
         "type": "uint64",
         "internalType": "uint64"
+      },
+      {
+        "name": "buyers",
+        "type": "uint32",
+        "internalType": "uint32"
+      },
+      {
+        "name": "payoutBps",
+        "type": "uint16",
+        "internalType": "uint16"
       },
       {
         "name": "priorTag",
@@ -314,6 +357,11 @@ export const SAM_ABI = [
         "internalType": "uint64"
       },
       {
+        "name": "buyer",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
         "name": "encKeyForBuyer",
         "type": "bytes",
         "internalType": "bytes"
@@ -353,35 +401,6 @@ export const SAM_ABI = [
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "fillBounty",
-    "inputs": [
-      {
-        "name": "bountyId",
-        "type": "uint64",
-        "internalType": "uint64"
-      },
-      {
-        "name": "commitHash",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "ciphertext",
-        "type": "bytes",
-        "internalType": "bytes"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "claimId",
-        "type": "uint64",
-        "internalType": "uint64"
-      }
-    ],
-    "stateMutability": "payable"
   },
   {
     "type": "function",
@@ -480,6 +499,87 @@ export const SAM_ABI = [
   },
   {
     "type": "function",
+    "name": "leadSaturation",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "leadWeightBps",
+    "inputs": [
+      {
+        "name": "committedAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "lockTime",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "listClaim",
+    "inputs": [
+      {
+        "name": "gameId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "playerId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "commitHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "ciphertext",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "askRevealFee",
+        "type": "uint96",
+        "internalType": "uint96"
+      },
+      {
+        "name": "askContingent",
+        "type": "uint96",
+        "internalType": "uint96"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "claimId",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
     "name": "nextBountyId",
     "inputs": [],
     "outputs": [
@@ -519,6 +619,45 @@ export const SAM_ABI = [
   },
   {
     "type": "function",
+    "name": "payoutBpsFor",
+    "inputs": [
+      {
+        "name": "committedAt",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "lockTime",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "tag",
+        "type": "uint8",
+        "internalType": "enum SealedAvailabilityMarket.ReportTag"
+      },
+      {
+        "name": "practice",
+        "type": "uint8",
+        "internalType": "enum SealedAvailabilityMarket.Practice"
+      },
+      {
+        "name": "actual",
+        "type": "uint8",
+        "internalType": "enum SealedAvailabilityMarket.Outcome"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "postBounty",
     "inputs": [
       {
@@ -532,12 +671,12 @@ export const SAM_ABI = [
         "internalType": "bytes32"
       },
       {
-        "name": "revealFee",
+        "name": "maxRevealFee",
         "type": "uint96",
         "internalType": "uint96"
       },
       {
-        "name": "contingent",
+        "name": "maxContingent",
         "type": "uint96",
         "internalType": "uint96"
       }
@@ -550,6 +689,30 @@ export const SAM_ABI = [
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "priorActiveBps",
+    "inputs": [
+      {
+        "name": "tag",
+        "type": "uint8",
+        "internalType": "enum SealedAvailabilityMarket.ReportTag"
+      },
+      {
+        "name": "practice",
+        "type": "uint8",
+        "internalType": "enum SealedAvailabilityMarket.Practice"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "pure"
   },
   {
     "type": "function",
@@ -613,6 +776,40 @@ export const SAM_ABI = [
   },
   {
     "type": "function",
+    "name": "purchases",
+    "inputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "revealFee",
+        "type": "uint96",
+        "internalType": "uint96"
+      },
+      {
+        "name": "contingent",
+        "type": "uint96",
+        "internalType": "uint96"
+      },
+      {
+        "name": "state",
+        "type": "uint8",
+        "internalType": "enum SealedAvailabilityMarket.PurchaseState"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "refundUndelivered",
     "inputs": [
       {
@@ -632,6 +829,24 @@ export const SAM_ABI = [
         "name": "compressedPubKey",
         "type": "bytes",
         "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "resolvePurchase",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "buyer",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [],
@@ -780,6 +995,35 @@ export const SAM_ABI = [
   },
   {
     "type": "function",
+    "name": "surpriseBps",
+    "inputs": [
+      {
+        "name": "tag",
+        "type": "uint8",
+        "internalType": "enum SealedAvailabilityMarket.ReportTag"
+      },
+      {
+        "name": "practice",
+        "type": "uint8",
+        "internalType": "enum SealedAvailabilityMarket.Practice"
+      },
+      {
+        "name": "actual",
+        "type": "uint8",
+        "internalType": "enum SealedAvailabilityMarket.Outcome"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
     "name": "unwindClaim",
     "inputs": [
       {
@@ -864,6 +1108,19 @@ export const SAM_ABI = [
   },
   {
     "type": "event",
+    "name": "BountyCancelled",
+    "inputs": [
+      {
+        "name": "bountyId",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "BountyPosted",
     "inputs": [
       {
@@ -891,13 +1148,13 @@ export const SAM_ABI = [
         "internalType": "bytes32"
       },
       {
-        "name": "revealFee",
+        "name": "maxRevealFee",
         "type": "uint96",
         "indexed": false,
         "internalType": "uint96"
       },
       {
-        "name": "contingent",
+        "name": "maxContingent",
         "type": "uint96",
         "indexed": false,
         "internalType": "uint96"
@@ -907,16 +1164,10 @@ export const SAM_ABI = [
   },
   {
     "type": "event",
-    "name": "ClaimCommitted",
+    "name": "ClaimListed",
     "inputs": [
       {
         "name": "claimId",
-        "type": "uint64",
-        "indexed": true,
-        "internalType": "uint64"
-      },
-      {
-        "name": "bountyId",
         "type": "uint64",
         "indexed": true,
         "internalType": "uint64"
@@ -926,6 +1177,18 @@ export const SAM_ABI = [
         "type": "address",
         "indexed": true,
         "internalType": "address"
+      },
+      {
+        "name": "gameId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "playerId",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
       },
       {
         "name": "commitHash",
@@ -938,6 +1201,24 @@ export const SAM_ABI = [
         "type": "uint96",
         "indexed": false,
         "internalType": "uint96"
+      },
+      {
+        "name": "askRevealFee",
+        "type": "uint96",
+        "indexed": false,
+        "internalType": "uint96"
+      },
+      {
+        "name": "askContingent",
+        "type": "uint96",
+        "indexed": false,
+        "internalType": "uint96"
+      },
+      {
+        "name": "committedAt",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
       },
       {
         "name": "priorTag",
@@ -975,22 +1256,15 @@ export const SAM_ABI = [
         "type": "address",
         "indexed": true,
         "internalType": "address"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "ClaimRefunded",
-    "inputs": [
-      {
-        "name": "claimId",
-        "type": "uint64",
-        "indexed": true,
-        "internalType": "uint64"
       },
       {
-        "name": "bond",
+        "name": "revealFee",
+        "type": "uint96",
+        "indexed": false,
+        "internalType": "uint96"
+      },
+      {
+        "name": "contingent",
         "type": "uint96",
         "indexed": false,
         "internalType": "uint96"
@@ -1094,10 +1368,10 @@ export const SAM_ABI = [
         "internalType": "uint96"
       },
       {
-        "name": "escrowReleased",
-        "type": "uint96",
+        "name": "payoutBps",
+        "type": "uint16",
         "indexed": false,
-        "internalType": "uint96"
+        "internalType": "uint16"
       }
     ],
     "anonymous": false
@@ -1145,12 +1419,6 @@ export const SAM_ABI = [
       },
       {
         "name": "bond",
-        "type": "uint96",
-        "indexed": false,
-        "internalType": "uint96"
-      },
-      {
-        "name": "escrow",
         "type": "uint96",
         "indexed": false,
         "internalType": "uint96"
@@ -1226,6 +1494,12 @@ export const SAM_ABI = [
         "internalType": "uint64"
       },
       {
+        "name": "buyer",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
         "name": "encKey",
         "type": "bytes",
         "indexed": false,
@@ -1292,6 +1566,62 @@ export const SAM_ABI = [
   },
   {
     "type": "event",
+    "name": "PurchaseRefunded",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "buyer",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint96",
+        "indexed": false,
+        "internalType": "uint96"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PurchaseResolved",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "buyer",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "toSeller",
+        "type": "uint96",
+        "indexed": false,
+        "internalType": "uint96"
+      },
+      {
+        "name": "toBuyer",
+        "type": "uint96",
+        "indexed": false,
+        "internalType": "uint96"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "Withdrawn",
     "inputs": [
       {
@@ -1312,6 +1642,11 @@ export const SAM_ABI = [
   {
     "type": "error",
     "name": "AlreadyAttested",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyPurchased",
     "inputs": []
   },
   {
@@ -1447,6 +1782,11 @@ export const SAM_ABI = [
   {
     "type": "error",
     "name": "RevealWindowOpen",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SelfDeal",
     "inputs": []
   },
   {

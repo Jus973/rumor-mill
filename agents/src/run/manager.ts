@@ -5,7 +5,7 @@
  *   1. publish the slate           createGame     — once a week
  *   2. publish the public prior    setPriorBatch  — as the injury report updates (~3x/week)
  *   3. attest the official list    attest         — once per game, after lock
- *   4. crank settlement            settle/slash   — permissionless; it just pays the gas
+ *   4. crank settlement            settle/resolvePurchase/slash — permissionless; it pays the gas
  *   5. collect its fee             withdraw       — % of each reveal fee, never of outcomes
  *
  * It does NOT decide who is right. It publishes what the league published, and the
@@ -16,12 +16,13 @@
 
 import { makeResolver } from '../resolver.js';
 import { publicClient, resolverAccount, schedulerWallet } from '../lib/chain.js';
-import { read, send, sendBatch } from '../lib/tx.js';
-import { act, info, sub } from '../lib/log.js';
+import { read, send } from '../lib/tx.js';
+import { act, info, sub, setT0 } from '../lib/log.js';
 import { fmt } from '../lib/seller.js';
 import { runAgent, inRun, DEFAULT_LOCK_SEC, FIXTURE_PATH, nextFreeWeek, chainTime } from './runtime.js';
 import { loadFixture, resolveFixture } from '../lib/fixtures.js';
-import { indexMarket } from '../lib/indexer.js';
+import { indexMarket, isTerminal } from '../lib/indexer.js';
+import { settleAndResolve, slashStale } from '../lib/crank.js';
 
 const NAME = 'MANAGER';
 const pub = publicClient();
@@ -37,6 +38,7 @@ async function main() {
   file.week = week;
 
   const t0 = await chainTime(pub);
+  setT0(t0);
   const scale = lockOffset / file.games[0].lockOffsetSec;
   for (const g of file.games) {
     g.lockOffsetSec = lockOffset;
@@ -64,11 +66,12 @@ async function main() {
       info(`  prior published: ${p.name.padEnd(22)} ${p.prior.tag}/${p.prior.practice}`);
     }
   }
-  info('sellers are now scored against THIS snapshot, frozen at the moment they commit');
+  info('sellers are priced and scored against THIS snapshot, frozen at the moment they list');
 
   // --- 2. attest, settle, slash, collect ------------------------------------
   const attested = new Set<string>();
   let settledAll = false;
+  const inScope = (c: { gameId: `0x${string}` }) => inRun(fixture, c.gameId);
 
   await runAgent({
     name: NAME,
@@ -92,44 +95,17 @@ async function main() {
       }
       if (attested.size < fixture.games.length) return false;
 
-      // CRANK: settle everything revealed and final.
-      const ready = [...state.claims.values()].filter(
-        (c) => inRun(state, fixture, c.bountyId) && c.revealed && !c.settled && !c.slashed && !c.refunded,
-      );
-      const finals = await Promise.all(
-        fixture.games.map((g) => read<boolean>(pub, 'isFinal', [g.gameId])),
-      );
-      if (ready.length > 0 && finals.every(Boolean)) {
-        const res = await sendBatch(
-          pub,
-          schedulerWallet(),
-          ready.map((c) => ({ functionName: 'settle', args: [BigInt(c.claimId)] })),
-        );
-        ready.forEach((c, i) => act(NAME, `settle claim#${c.claimId}`, res[i].hash));
+      // CRANK: settle everything revealed and final, pay out every purchase.
+      await settleAndResolve(pub, schedulerWallet(), state, inScope, NAME);
+
+      // CRANK: slash anything that never revealed past the deadline, then pay its buyers back.
+      const slashed = await slashStale(pub, schedulerWallet(), state, inScope, chainNow, NAME);
+      if (slashed.length > 0) {
+        const fresh = await indexMarket(pub);
+        await settleAndResolve(pub, schedulerWallet(), fresh, (c) => slashed.includes(c.claimId), NAME);
       }
 
-      // CRANK: slash anything that never revealed past the deadline.
-      const stale = [...state.claims.values()].filter(
-        (c) => inRun(state, fixture, c.bountyId) && !c.revealed && !c.settled && !c.slashed && !c.refunded,
-      );
-      for (const c of stale) {
-        const b = state.bounties.get(c.bountyId)!;
-        const g = state.games.get(b.gameId)!;
-        const cw = Number(await read<bigint>(pub, 'challengeWindow'));
-        const rw = Number(await read<bigint>(pub, 'revealWindow'));
-        if (!g.attested || chainNow <= Number(g.lockTime) + 0) continue;
-        const deadline = (await onchainAttestedAt(b.gameId)) + cw + rw;
-        if (chainNow <= deadline) continue;
-        const { hash } = await send(pub, schedulerWallet(), {
-          functionName: 'slashUnrevealed',
-          args: [BigInt(c.claimId)],
-        });
-        act(NAME, `slashUnrevealed claim#${c.claimId} — never revealed, bond forfeit to the burn sink`, hash);
-      }
-
-      const outstanding = [...state.claims.values()].filter(
-        (c) => inRun(state, fixture, c.bountyId) && !c.settled && !c.slashed && !c.refunded,
-      );
+      const outstanding = [...state.claims.values()].filter((c) => inScope(c) && !isTerminal(c));
       if (outstanding.length > 0) return false;
 
       if (!settledAll) {
@@ -142,16 +118,11 @@ async function main() {
         } else {
           info('no fees accrued this run');
         }
-        info('every claim on the slate is settled. MANAGER done.');
+        info('every listing on the slate is settled. MANAGER done.');
       }
       return true;
     },
   });
-}
-
-async function onchainAttestedAt(gameId: `0x${string}`): Promise<number> {
-  const g = await read<readonly [bigint, bigint, `0x${string}`, boolean]>(pub, 'games', [gameId]);
-  return Number(g[1]);
 }
 
 main().catch((e) => {

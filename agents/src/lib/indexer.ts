@@ -1,9 +1,13 @@
 /**
  * indexer.ts — rebuild all market state from logs.
  *
- * LLD §1 design rule: the contract is the only stateful component. Agents are stateless
- * scripts that replay from `getLogs(fromBlock: DEPLOY_BLOCK)` on startup. The web UI uses
- * the same normalization so both show identical numbers.
+ * Design rule: the contract is the only stateful component. Agents are stateless scripts
+ * that replay from `getLogs(fromBlock: DEPLOY_BLOCK)` on startup. A web UI would use the
+ * same normalization so both show identical numbers.
+ *
+ * Two independent flows meet here. Sellers LIST claims on (game, player) at an ask.
+ * Buyers post BOUNTIES — bids on (game, player) with a budget. Neither references the
+ * other on-chain; `offersForBounty` is the matcher.
  */
 
 import type { Address, Hex, PublicClient } from 'viem';
@@ -27,32 +31,48 @@ export interface IndexedGame {
   unwound: boolean;
 }
 
+/** A buyer's bid. Non-binding. */
 export interface IndexedBounty {
   bountyId: number;
   buyer: Address;
   gameId: Hex;
   playerId: Hex;
-  revealFee: bigint;
-  contingent: bigint;
+  maxRevealFee: bigint;
+  maxContingent: bigint;
+  cancelled: boolean;
 }
 
+/** One buyer's purchase of one listing. */
+export interface IndexedPurchase {
+  buyer: Address;
+  revealFee: bigint;
+  contingent: bigint;
+  encKey?: Hex;
+  refunded: boolean;
+  resolved?: { toSeller: bigint; toBuyer: bigint };
+}
+
+/** A seller's listing. */
 export interface IndexedClaim {
   claimId: number;
-  bountyId: number;
   seller: Address;
+  gameId: Hex;
+  playerId: Hex;
   commitHash: Hex;
   bond: bigint;
+  askRevealFee: bigint;
+  askContingent: bigint;
+  committedAt: number;
   priorTag: ReportTag;
   priorPractice: Practice;
   ciphertext: Hex;
   blockNumber: bigint;
-  purchased: boolean;
-  buyer?: Address;
-  encKey?: Hex;
+  /** keyed by lowercase buyer address */
+  purchases: Map<string, IndexedPurchase>;
   revealed?: { claimed: Outcome; bucket: Bucket; evidence: Hex };
-  settled?: { correct: boolean; actual: Outcome; escrowReleased: bigint };
+  settled?: { correct: boolean; actual: Outcome; payoutBps: number };
   slashed: boolean;
-  refunded: boolean;
+  unwound: boolean;
 }
 
 export interface MarketState {
@@ -103,8 +123,6 @@ export async function indexMarket(
   const penalties: PenaltyEvent[] = [];
   const refunded: Array<{ claimId: number; bond: bigint }> = [];
   const sellerOfClaim = new Map<number, string>();
-  // committedAt/lockTime are needed by the scorer but ClaimCommitted does not carry a
-  // timestamp, so take it from ClaimSettled itself (which does).
 
   const { decodeEventLog } = await import('viem');
 
@@ -146,26 +164,37 @@ export async function indexMarket(
           buyer: a.buyer,
           gameId: a.gameId,
           playerId: a.playerId,
-          revealFee: a.revealFee,
-          contingent: a.contingent,
+          maxRevealFee: a.maxRevealFee,
+          maxContingent: a.maxContingent,
+          cancelled: false,
         });
         break;
 
-      case 'ClaimCommitted': {
+      case 'BountyCancelled': {
+        const b = state.bounties.get(Number(a.bountyId));
+        if (b) b.cancelled = true;
+        break;
+      }
+
+      case 'ClaimListed': {
         const id = Number(a.claimId);
         state.claims.set(id, {
           claimId: id,
-          bountyId: Number(a.bountyId),
           seller: a.seller,
+          gameId: a.gameId,
+          playerId: a.playerId,
           commitHash: a.commitHash,
           bond: a.bond,
+          askRevealFee: a.askRevealFee,
+          askContingent: a.askContingent,
+          committedAt: Number(a.committedAt),
           priorTag: Number(a.priorTag) as ReportTag,
           priorPractice: Number(a.priorPractice) as Practice,
           ciphertext: a.ciphertext,
           blockNumber: log.blockNumber ?? 0n,
-          purchased: false,
+          purchases: new Map(),
           slashed: false,
-          refunded: false,
+          unwound: false,
         });
         sellerOfClaim.set(id, String(a.seller).toLowerCase());
         break;
@@ -174,15 +203,35 @@ export async function indexMarket(
       case 'ClaimPurchased': {
         const c = state.claims.get(Number(a.claimId));
         if (c) {
-          c.purchased = true;
-          c.buyer = a.buyer;
+          c.purchases.set(String(a.buyer).toLowerCase(), {
+            buyer: a.buyer,
+            revealFee: a.revealFee,
+            contingent: a.contingent,
+            refunded: false,
+          });
         }
         break;
       }
 
       case 'KeyDelivered': {
-        const c = state.claims.get(Number(a.claimId));
-        if (c) c.encKey = a.encKey;
+        const p = state.claims.get(Number(a.claimId))?.purchases.get(String(a.buyer).toLowerCase());
+        if (p) p.encKey = a.encKey;
+        break;
+      }
+
+      case 'PurchaseRefunded': {
+        const id = Number(a.claimId);
+        const p = state.claims.get(id)?.purchases.get(String(a.buyer).toLowerCase());
+        if (p) p.refunded = true;
+        // No seller field on this event — joined below against ClaimListed. Bond = 0: a
+        // refund never burns the bond, so this is a reputational penalty only.
+        refunded.push({ claimId: id, bond: 0n });
+        break;
+      }
+
+      case 'PurchaseResolved': {
+        const p = state.claims.get(Number(a.claimId))?.purchases.get(String(a.buyer).toLowerCase());
+        if (p) p.resolved = { toSeller: a.toSeller, toBuyer: a.toBuyer };
         break;
       }
 
@@ -204,7 +253,7 @@ export async function indexMarket(
 
       case 'ClaimUnwound': {
         const c = state.claims.get(Number(a.claimId));
-        if (c) c.refunded = true; // terminal, funds returned, nobody scored
+        if (c) c.unwound = true; // terminal, funds returned, nobody scored
         break;
       }
 
@@ -233,7 +282,7 @@ export async function indexMarket(
           c.settled = {
             correct: Boolean(a.correct),
             actual: Number(a.actual) as Outcome,
-            escrowReleased: a.escrowReleased,
+            payoutBps: Number(a.payoutBps),
           };
         }
         settled.push({
@@ -247,7 +296,7 @@ export async function indexMarket(
           committedAt: Number(a.committedAt),
           lockTime: Number(a.lockTime),
           bond: a.bond as unknown as bigint,
-          escrowReleased: a.escrowReleased as unknown as bigint,
+          payoutBps: Number(a.payoutBps),
         });
         break;
       }
@@ -264,15 +313,6 @@ export async function indexMarket(
         });
         break;
       }
-
-      case 'ClaimRefunded': {
-        const id = Number(a.claimId);
-        const c = state.claims.get(id);
-        if (c) c.refunded = true;
-        // No seller field on this event (§3.4) — joined below against ClaimCommitted.
-        refunded.push({ claimId: id, bond: a.bond as unknown as bigint });
-        break;
-      }
     }
   }
 
@@ -283,10 +323,47 @@ export async function indexMarket(
   return state;
 }
 
-export function claimsForBounty(state: MarketState, bountyId: number): IndexedClaim[] {
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
+/** A listing is terminal once settled, slashed, or unwound. */
+export function isTerminal(c: IndexedClaim): boolean {
+  return Boolean(c.settled) || c.slashed || c.unwound;
+}
+
+/** Every listing on one (game, player), oldest first. */
+export function claimsFor(state: MarketState, gameId: Hex, playerId: Hex): IndexedClaim[] {
   return [...state.claims.values()]
-    .filter((c) => c.bountyId === bountyId)
+    .filter((c) => c.gameId === gameId && c.playerId === playerId)
     .sort((a, b) => a.claimId - b.claimId);
+}
+
+/** Does this listing satisfy this bid? Same slot, ask within budget. */
+export function matchesBounty(c: IndexedClaim, b: IndexedBounty): boolean {
+  return (
+    c.gameId === b.gameId &&
+    c.playerId === b.playerId &&
+    c.askRevealFee <= b.maxRevealFee &&
+    c.askContingent <= b.maxContingent
+  );
+}
+
+/** THE MATCHER: listings that answer a buyer's bid. Off-chain by design. */
+export function offersForBounty(state: MarketState, bountyId: number): IndexedClaim[] {
+  const b = state.bounties.get(bountyId);
+  if (!b) return [];
+  return [...state.claims.values()]
+    .filter((c) => matchesBounty(c, b))
+    .sort((a, b2) => a.claimId - b2.claimId);
+}
+
+/** Open bids on one (game, player) — what a seller sees as demand. */
+export function bountiesFor(state: MarketState, gameId: Hex, playerId: Hex, now: number): IndexedBounty[] {
+  return [...state.bounties.values()].filter((b) => {
+    const g = state.games.get(b.gameId);
+    return b.gameId === gameId && b.playerId === playerId && !b.cancelled && g && now < g.lockTime;
+  });
 }
 
 export function claimsBySeller(state: MarketState, seller: Address): IndexedClaim[] {
@@ -299,6 +376,11 @@ export function claimsBySeller(state: MarketState, seller: Address): IndexedClai
 export function openBounties(state: MarketState, now: number): IndexedBounty[] {
   return [...state.bounties.values()].filter((b) => {
     const g = state.games.get(b.gameId);
-    return g && now < g.lockTime;
+    return !b.cancelled && g && now < g.lockTime;
   });
+}
+
+/** Purchases of this claim by this buyer, if any. */
+export function purchaseBy(c: IndexedClaim, buyer: Address): IndexedPurchase | undefined {
+  return c.purchases.get(buyer.toLowerCase());
 }

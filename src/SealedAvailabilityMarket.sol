@@ -3,31 +3,35 @@ pragma solidity 0.8.28;
 
 /**
  * @title SealedAvailabilityMarket
- * @notice A market for sealed, bonded claims about NFL player availability.
+ * @notice A two-sided market for sealed, bonded claims about NFL player availability.
  *
- * Sellers (tipster agents) fill buyer bounties with a committed claim about whether a
- * player will appear on the official inactive list. The claim is sealed: the ciphertext
- * is public from the moment of the fill, but the AES key that opens it is withheld until
- * the buyer pays. Purchases close at a hard lineup lock. When the resolver attests the
- * official list, every claim on that game settles in one batch.
+ * SELLERS list whenever they have something. A listing is a sealed claim on one
+ * (game, player): the ciphertext is public from the moment it is listed, the AES key that
+ * opens it is withheld until a buyer pays, and a bond scaled to the seller's confidence
+ * sits behind it. The seller names its own ask.
+ *
+ * BUYERS post bounties whenever they want to search. A bounty is a bid: "I want intel on
+ * this player in this game, and I will pay up to this much." It is non-binding and escrows
+ * nothing; matching a bounty to a listing happens off-chain. Any registered buyer can hit
+ * any listing, and one listing can sell to many buyers, each with its own escrow.
  *
  * The mechanism, in the order it resists gaming:
- *   1. Sealed commit      — content is fixed before lock and cannot be edited after a sale.
- *   2. Lock cliff         — stale intel is unsellable by construction.
- *   3. Mandatory reveal   — every claim, sold or not, is revealed or forfeits its bond,
- *                           so a seller's miss history cannot be cherry-picked.
- *   4. Bond at reveal     — bond must clear the confidence schedule, without leaking
- *                           confidence at fill time.
- *   5. Batch attestation  — one resolver attestation settles the whole game.
- *   6. Pull payments      — no push transfers anywhere except withdraw().
+ *   1. Sealed commit      — content is fixed at listing and cannot be edited after a sale.
+ *   2. Lock cliff         — listings, purchases and key delivery all close at lineup lock.
+ *   3. Mandatory reveal   — every listing, sold or not, is revealed or forfeits its bond.
+ *   4. Bond at reveal     — the bond must clear the confidence schedule, checked only when
+ *                           the bucket finally becomes public.
+ *   5. Batch attestation  — one attestation settles every claim on the game.
+ *   6. Priced on surprise — the contingent leg a correct seller collects is scaled by how
+ *                           early it committed and by how much it disagreed with the public
+ *                           report at that moment. Restating an obvious report earns ~0.
+ *   7. Pull payments      — no push transfers anywhere except withdraw().
  *
- * Scoring is deliberately OFF-CHAIN. `ClaimSettled` carries every input the scorer needs
- * (the prior snapshot taken at commit time, the bucket, lead time, and the outcome), so
- * reputation is a pure fold over one event type and can be recomputed by anyone.
+ * Reputation scoring stays OFF-CHAIN: `ClaimSettled` carries every input the scorer needs.
  */
 contract SealedAvailabilityMarket {
     // -----------------------------------------------------------------------
-    // Enums (ordering is part of the ABI — agents/src/lib/crypto.ts mirrors it)
+    // Enums (ordering is part of the ABI — agents/src/lib/enums.ts mirrors it)
     // -----------------------------------------------------------------------
 
     enum ReportTag {
@@ -59,15 +63,20 @@ contract SealedAvailabilityMarket {
     }
 
     enum ClaimState {
-        Committed,
-        Purchased,
-        KeyDelivered,
+        Listed,
         Revealed,
         SettledCorrect,
         SettledWrong,
         Slashed,
-        RefundedUndelivered,
         Unwound
+    }
+
+    enum PurchaseState {
+        None,
+        Paid,
+        KeyDelivered,
+        Refunded,
+        Resolved
     }
 
     // -----------------------------------------------------------------------
@@ -88,22 +97,29 @@ contract SealedAvailabilityMarket {
         uint64 updatedAt;
     }
 
+    /// A buyer's bid. Non-binding; escrows nothing. Matching is off-chain.
     struct Bounty {
         address buyer;
         bytes32 gameId;
         bytes32 playerId;
-        uint96 revealFee;
-        uint96 contingent;
+        uint96 maxRevealFee;
+        uint96 maxContingent;
+        bool cancelled;
     }
 
+    /// A seller's listing. Independent of any bounty.
     struct Claim {
-        uint64 bountyId;
         address seller;
+        bytes32 gameId;
+        bytes32 playerId;
         bytes32 commitHash;
         bytes32 ciphertextHash;
         uint96 bond;
-        uint96 escrow; // contingent actually deposited at purchase; 0 if never sold
+        uint96 askRevealFee;
+        uint96 askContingent;
         uint64 committedAt;
+        uint32 buyers; // number of purchases
+        uint16 payoutBps; // share of each escrow the seller earns; set at settle
         ReportTag priorTag;
         Practice priorPractice;
         Bucket bucket;
@@ -111,11 +127,19 @@ contract SealedAvailabilityMarket {
         ClaimState state;
     }
 
+    /// One buyer's purchase of one listing.
+    struct Purchase {
+        uint96 revealFee;
+        uint96 contingent;
+        PurchaseState state;
+    }
+
     mapping(bytes32 => Game) public games;
     mapping(bytes32 => mapping(bytes32 => Prior)) public priors;
     mapping(bytes32 => mapping(bytes32 => bool)) public inactive;
     mapping(uint64 => Bounty) public bounties;
     mapping(uint64 => Claim) public claims;
+    mapping(uint64 => mapping(address => Purchase)) public purchases;
     mapping(address => bytes) public encPubKeys;
     mapping(address => uint256) public balances;
 
@@ -135,9 +159,8 @@ contract SealedAvailabilityMarket {
      *
      * Deliberately charged on the SALE and never on the settlement outcome. The operator is
      * also the attester, so any fee that varied with whether claims settle correct or wrong
-     * would pay them to attest falsely. A cut of burned bonds would be worst of all: it
-     * would make the oracle profit from sellers being wrong. This fee is fixed at the moment
-     * the key changes hands, before any outcome exists.
+     * would pay them to attest falsely. This fee is fixed at the moment the key changes
+     * hands, before any outcome exists.
      */
     uint16 public immutable protocolFeeBps;
     uint96 public immutable baseBond;
@@ -145,16 +168,16 @@ contract SealedAvailabilityMarket {
     uint64 public immutable revealWindow;
     /**
      * How long after lock the market waits for an attestation before ANYONE may unwind the
-     * game and hand every participant their money back.
-     *
-     * The operator is centralized on the happy path: it is the only party that can attest,
-     * and everyone depends on it for speed. But `settle` and `slashUnrevealed` both gate on
-     * `isFinal`, which needs an attestation — so without this, an operator that simply went
-     * away would freeze every bond and every escrow on the game permanently.
-     *
-     * This is the escape hatch. You trust the operator for CONVENIENCE, never for CUSTODY.
+     * game and hand every participant their money back. You trust the operator for
+     * CONVENIENCE, never for CUSTODY.
      */
     uint64 public immutable unwindDelay;
+    /**
+     * Lead time at which the price multiplier saturates. A claim committed this far (or
+     * further) before lock earns the full contingent; one committed at lock earns 10%.
+     * Production story: 96 hours. Demo: a couple of minutes.
+     */
+    uint64 public immutable leadSaturation;
 
     uint256 private _reentrancyLock = 1;
 
@@ -164,32 +187,38 @@ contract SealedAvailabilityMarket {
 
     event GameCreated(bytes32 indexed gameId, uint64 lockTime);
     event PriorSet(bytes32 indexed gameId, bytes32 indexed playerId, ReportTag tag, Practice practice);
+    event EncPubKeyRegistered(address indexed who, bytes pubKey);
     event BountyPosted(
         uint64 indexed bountyId,
         address indexed buyer,
         bytes32 indexed gameId,
         bytes32 playerId,
-        uint96 revealFee,
-        uint96 contingent
+        uint96 maxRevealFee,
+        uint96 maxContingent
     );
-    event EncPubKeyRegistered(address indexed who, bytes pubKey);
-    event ClaimCommitted(
+    event BountyCancelled(uint64 indexed bountyId);
+    event ClaimListed(
         uint64 indexed claimId,
-        uint64 indexed bountyId,
         address indexed seller,
+        bytes32 indexed gameId,
+        bytes32 playerId,
         bytes32 commitHash,
         uint96 bond,
+        uint96 askRevealFee,
+        uint96 askContingent,
+        uint64 committedAt,
         ReportTag priorTag,
         Practice priorPractice,
         bytes ciphertext
     );
-    event ClaimPurchased(uint64 indexed claimId, address indexed buyer);
-    event KeyDelivered(uint64 indexed claimId, bytes encKey);
+    event ClaimPurchased(uint64 indexed claimId, address indexed buyer, uint96 revealFee, uint96 contingent);
+    event KeyDelivered(uint64 indexed claimId, address indexed buyer, bytes encKey);
     event ProtocolFeeAccrued(uint64 indexed claimId, address indexed recipient, uint96 amount);
+    event PurchaseRefunded(uint64 indexed claimId, address indexed buyer, uint96 amount);
     event Attested(bytes32 indexed gameId, bytes32 reportHash, bytes32[] inactivePlayerIds);
     event AttestationVoided(bytes32 indexed gameId);
     event GameUnwound(bytes32 indexed gameId, address indexed triggeredBy);
-    event ClaimUnwound(uint64 indexed claimId, address indexed seller, uint96 bond, uint96 escrow);
+    event ClaimUnwound(uint64 indexed claimId, address indexed seller, uint96 bond);
     event ClaimRevealed(uint64 indexed claimId, Outcome claimed, Bucket bucket, bytes evidence);
     event ClaimSettled(
         uint64 indexed claimId,
@@ -202,10 +231,10 @@ contract SealedAvailabilityMarket {
         uint64 committedAt,
         uint64 lockTime,
         uint96 bond,
-        uint96 escrowReleased
+        uint16 payoutBps
     );
+    event PurchaseResolved(uint64 indexed claimId, address indexed buyer, uint96 toSeller, uint96 toBuyer);
     event ClaimSlashed(uint64 indexed claimId, address indexed seller, uint96 bond);
-    event ClaimRefunded(uint64 indexed claimId, uint96 bond);
     event Withdrawn(address indexed who, uint256 amount);
 
     // -----------------------------------------------------------------------
@@ -217,6 +246,7 @@ contract SealedAvailabilityMarket {
     error NotOwner();
     error NotSeller();
     error NotBuyer();
+    error SelfDeal();
     error GameExists();
     error NoGame();
     error NoBounty();
@@ -228,6 +258,7 @@ contract SealedAvailabilityMarket {
     error BondTooLow();
     error BadPubKey();
     error NoPubKey();
+    error AlreadyPurchased();
     error AlreadyAttested();
     error NotAttested();
     error AlreadyUnwound();
@@ -248,12 +279,10 @@ contract SealedAvailabilityMarket {
     // -----------------------------------------------------------------------
 
     /**
-     * Scheduling and attesting are deliberately SEPARATE roles.
-     *
-     * Scoring is `Δ = w * (ln(qy) - ln(py))`, where `py` comes from the prior snapshot and
-     * `qy` from the outcome. A single key holding both roles could move any seller's
-     * reputation by rewriting what was "publicly known" at commit time, not just by lying
-     * about who sat out. Splitting them means the oracle decides outcomes and nothing else.
+     * Scheduling and attesting are deliberately SEPARATE roles. Scoring and pricing both
+     * read the prior snapshot AND the outcome, so a single key holding both could move any
+     * seller's payout two ways. Splitting them means the oracle decides outcomes and
+     * nothing else.
      */
     modifier onlyScheduler() {
         if (msg.sender != scheduler) revert NotScheduler();
@@ -287,7 +316,8 @@ contract SealedAvailabilityMarket {
         uint96 _baseBond,
         uint64 _challengeWindow,
         uint64 _revealWindow,
-        uint64 _unwindDelay
+        uint64 _unwindDelay,
+        uint64 _leadSaturation
     ) {
         scheduler = _scheduler;
         attester = _attester;
@@ -295,15 +325,17 @@ contract SealedAvailabilityMarket {
         burnSink = _burnSink;
         feeRecipient = _feeRecipient;
         if (_protocolFeeBps > 1000) revert BadValue(); // hard cap at 10%
+        if (_leadSaturation == 0) revert BadValue();
         protocolFeeBps = _protocolFeeBps;
         baseBond = _baseBond;
         challengeWindow = _challengeWindow;
         revealWindow = _revealWindow;
         unwindDelay = _unwindDelay;
+        leadSaturation = _leadSaturation;
     }
 
     // -----------------------------------------------------------------------
-    // Setup (resolver)
+    // Setup (scheduler)
     // -----------------------------------------------------------------------
 
     function createGame(bytes32 gameId, uint64 lockTime) external onlyScheduler {
@@ -335,7 +367,7 @@ contract SealedAvailabilityMarket {
     }
 
     // -----------------------------------------------------------------------
-    // Buyers
+    // Buyers: search
     // -----------------------------------------------------------------------
 
     /// @notice Register the compressed secp256k1 pubkey that sellers wrap K to.
@@ -347,7 +379,12 @@ contract SealedAvailabilityMarket {
         emit EncPubKeyRegistered(msg.sender, compressedPubKey);
     }
 
-    function postBounty(bytes32 gameId, bytes32 playerId, uint96 revealFee, uint96 contingent)
+    /**
+     * @notice Post a bid: "I want intel on this player, up to this price."
+     * @dev Non-binding and escrows nothing. It is the demand signal sellers watch, and the
+     *      query the buyer's own agent matches listings against. Money moves at `purchase`.
+     */
+    function postBounty(bytes32 gameId, bytes32 playerId, uint96 maxRevealFee, uint96 maxContingent)
         external
         returns (uint64 bountyId)
     {
@@ -360,127 +397,165 @@ contract SealedAvailabilityMarket {
             buyer: msg.sender,
             gameId: gameId,
             playerId: playerId,
-            revealFee: revealFee,
-            contingent: contingent
+            maxRevealFee: maxRevealFee,
+            maxContingent: maxContingent,
+            cancelled: false
         });
-        emit BountyPosted(bountyId, msg.sender, gameId, playerId, revealFee, contingent);
+        emit BountyPosted(bountyId, msg.sender, gameId, playerId, maxRevealFee, maxContingent);
     }
 
-    /// @notice Buy a sealed claim. The key arrives in a separate seller tx (deliverKey).
-    function purchase(uint64 claimId) external payable {
-        Claim storage c = claims[claimId];
-        if (c.seller == address(0)) revert NoClaim();
-        if (c.state != ClaimState.Committed) revert BadState();
-
-        Bounty storage b = bounties[c.bountyId];
+    function cancelBounty(uint64 bountyId) external {
+        Bounty storage b = bounties[bountyId];
+        if (b.buyer == address(0)) revert NoBounty();
         if (msg.sender != b.buyer) revert NotBuyer();
-        if (encPubKeys[msg.sender].length == 0) revert NoPubKey();
-        if (msg.value != uint256(b.revealFee) + uint256(b.contingent)) revert BadValue();
-
-        // The lock cliff: intel cannot be sold once lineups are locked.
-        if (block.timestamp >= games[b.gameId].lockTime) revert LockPassed();
-
-        c.state = ClaimState.Purchased;
-        c.escrow = b.contingent;
-        emit ClaimPurchased(claimId, msg.sender);
-    }
-
-    /// @notice Buyer paid but no key arrived before lock: refund fee + escrow, burn the bond.
-    function refundUndelivered(uint64 claimId) external {
-        Claim storage c = claims[claimId];
-        if (c.seller == address(0)) revert NoClaim();
-        if (c.state != ClaimState.Purchased) revert BadState();
-
-        Bounty storage b = bounties[c.bountyId];
-        if (block.timestamp < games[b.gameId].lockTime) revert LockNotReached();
-
-        uint96 escrow = c.escrow;
-        c.escrow = 0;
-        c.state = ClaimState.RefundedUndelivered;
-
-        // revealFee is only credited to the seller at deliverKey, so both legs return here.
-        balances[b.buyer] += uint256(b.revealFee) + uint256(escrow);
-        balances[burnSink] += c.bond;
-
-        emit ClaimRefunded(claimId, c.bond);
+        b.cancelled = true;
+        emit BountyCancelled(bountyId);
     }
 
     // -----------------------------------------------------------------------
-    // Sellers
+    // Sellers: list
     // -----------------------------------------------------------------------
 
     /**
-     * @notice Fill a bounty with a sealed, bonded claim.
+     * @notice List a sealed, bonded claim on (game, player) at your own ask.
      * @dev The bucket is NOT supplied here — it is hidden until reveal, so the bond cannot
      *      be schedule-checked yet. Any bond >= baseBond is accepted; `reveal` then enforces
      *      `bond >= bondFor(bucket)`. A seller who under-bonds a high-confidence claim simply
-     *      cannot reveal it, and is slashed instead. This keeps "bond scales with confidence"
-     *      without leaking confidence at fill time.
+     *      cannot reveal it, and is slashed instead.
+     *
+     *      The public prior is snapshotted AS OF THIS MOMENT. Pricing and scoring both
+     *      measure surprise against what was public when the seller committed, not against
+     *      a later revision — so an early call is not punished when the report catches up.
      */
-    function fillBounty(uint64 bountyId, bytes32 commitHash, bytes calldata ciphertext)
-        external
-        payable
-        returns (uint64 claimId)
-    {
-        Bounty storage b = bounties[bountyId];
-        if (b.buyer == address(0)) revert NoBounty();
-        if (ciphertext.length == 0) revert EmptyCiphertext();
-
-        Game storage g = games[b.gameId];
+    function listClaim(
+        bytes32 gameId,
+        bytes32 playerId,
+        bytes32 commitHash,
+        bytes calldata ciphertext,
+        uint96 askRevealFee,
+        uint96 askContingent
+    ) external payable returns (uint64 claimId) {
+        Game storage g = games[gameId];
+        if (g.lockTime == 0) revert NoGame();
         if (block.timestamp >= g.lockTime) revert LockPassed();
+        if (ciphertext.length == 0) revert EmptyCiphertext();
         if (msg.value < baseBond) revert BondTooLow();
         if (msg.value > type(uint96).max) revert BadValue();
 
-        // Snapshot the public prior AS OF THIS MOMENT. Scoring measures surprise against
-        // what was public when the seller committed, not against a later revision.
-        Prior storage p = priors[b.gameId][b.playerId];
+        Prior storage p = priors[gameId][playerId];
 
         claimId = nextClaimId++;
         claims[claimId] = Claim({
-            bountyId: bountyId,
             seller: msg.sender,
+            gameId: gameId,
+            playerId: playerId,
             commitHash: commitHash,
             ciphertextHash: keccak256(ciphertext),
             bond: uint96(msg.value),
-            escrow: 0,
+            askRevealFee: askRevealFee,
+            askContingent: askContingent,
             committedAt: uint64(block.timestamp),
+            buyers: 0,
+            payoutBps: 0,
             priorTag: p.tag,
             priorPractice: p.practice,
             bucket: Bucket.B55,
             claimed: Outcome.UNRESOLVED,
-            state: ClaimState.Committed
+            state: ClaimState.Listed
         });
 
-        emit ClaimCommitted(
-            claimId, bountyId, msg.sender, commitHash, uint96(msg.value), p.tag, p.practice, ciphertext
+        emit ClaimListed(
+            claimId,
+            msg.sender,
+            gameId,
+            playerId,
+            commitHash,
+            uint96(msg.value),
+            askRevealFee,
+            askContingent,
+            uint64(block.timestamp),
+            p.tag,
+            p.practice,
+            ciphertext
         );
     }
 
-    /// @notice Deliver ECIES(buyerPubKey, K) after purchase. Credits the reveal fee here.
-    function deliverKey(uint64 claimId, bytes calldata encKeyForBuyer) external {
+    // -----------------------------------------------------------------------
+    // Buyers: buy
+    // -----------------------------------------------------------------------
+
+    /// @notice Hit a listing at its ask. The key arrives in a separate seller tx.
+    function purchase(uint64 claimId) external payable {
+        Claim storage c = claims[claimId];
+        if (c.seller == address(0)) revert NoClaim();
+        if (c.state != ClaimState.Listed) revert BadState();
+        if (msg.sender == c.seller) revert SelfDeal();
+        if (encPubKeys[msg.sender].length == 0) revert NoPubKey();
+        if (msg.value != uint256(c.askRevealFee) + uint256(c.askContingent)) revert BadValue();
+
+        // The lock cliff: intel cannot be sold once lineups are locked.
+        if (block.timestamp >= games[c.gameId].lockTime) revert LockPassed();
+
+        Purchase storage p = purchases[claimId][msg.sender];
+        if (p.state != PurchaseState.None) revert AlreadyPurchased();
+
+        p.revealFee = c.askRevealFee;
+        p.contingent = c.askContingent;
+        p.state = PurchaseState.Paid;
+        c.buyers += 1;
+
+        emit ClaimPurchased(claimId, msg.sender, c.askRevealFee, c.askContingent);
+    }
+
+    /**
+     * @notice Buyer paid but no key arrived before lock: full refund of fee + escrow.
+     * @dev The bond is NOT burned here. Non-delivery is scored as a miss off-chain, and the
+     *      claim itself still faces mandatory reveal and settlement like any other. Burning
+     *      the bond on a single undelivered purchase would let any buyer torch a seller by
+     *      purchasing one second before lock.
+     */
+    function refundUndelivered(uint64 claimId) external {
+        Claim storage c = claims[claimId];
+        if (c.seller == address(0)) revert NoClaim();
+        Purchase storage p = purchases[claimId][msg.sender];
+        if (p.state != PurchaseState.Paid) revert BadState();
+        if (block.timestamp < games[c.gameId].lockTime) revert LockNotReached();
+
+        uint96 amount = p.revealFee + p.contingent;
+        p.state = PurchaseState.Refunded;
+        balances[msg.sender] += amount;
+
+        emit PurchaseRefunded(claimId, msg.sender, amount);
+    }
+
+    // -----------------------------------------------------------------------
+    // Sellers: deliver, reveal
+    // -----------------------------------------------------------------------
+
+    /// @notice Deliver ECIES(buyerPubKey, K) to one buyer. Credits the reveal fee here.
+    function deliverKey(uint64 claimId, address buyer, bytes calldata encKeyForBuyer) external {
         Claim storage c = claims[claimId];
         if (c.seller == address(0)) revert NoClaim();
         if (msg.sender != c.seller) revert NotSeller();
-        if (c.state != ClaimState.Purchased) revert BadState();
+        if (block.timestamp >= games[c.gameId].lockTime) revert LockPassed();
 
-        Bounty storage b = bounties[c.bountyId];
-        if (block.timestamp >= games[b.gameId].lockTime) revert LockPassed();
-
-        c.state = ClaimState.KeyDelivered;
+        Purchase storage p = purchases[claimId][buyer];
+        if (p.state != PurchaseState.Paid) revert BadState();
+        p.state = PurchaseState.KeyDelivered;
 
         // Outcome-independent protocol fee, taken from the seller's proceeds on the sale.
-        uint96 fee = uint96((uint256(b.revealFee) * protocolFeeBps) / 10_000);
+        uint96 fee = uint96((uint256(p.revealFee) * protocolFeeBps) / 10_000);
         if (fee != 0) {
             balances[feeRecipient] += fee;
             emit ProtocolFeeAccrued(claimId, feeRecipient, fee);
         }
-        balances[c.seller] += uint256(b.revealFee) - fee;
+        balances[c.seller] += uint256(p.revealFee) - fee;
 
-        emit KeyDelivered(claimId, encKeyForBuyer);
+        emit KeyDelivered(claimId, buyer, encKeyForBuyer);
     }
 
     /**
-     * @notice Mandatory reveal. Every claim is revealed after lock or forfeits its bond.
+     * @notice Mandatory reveal. Every listing is revealed after lock or forfeits its bond.
      * @dev Gated on `block.timestamp >= lockTime` so a reveal cannot leak the claim to
      *      non-buyers while it is still sellable.
      */
@@ -490,11 +565,10 @@ contract SealedAvailabilityMarket {
         Claim storage c = claims[claimId];
         if (c.seller == address(0)) revert NoClaim();
         if (msg.sender != c.seller) revert NotSeller();
-        if (c.state != ClaimState.Committed && c.state != ClaimState.KeyDelivered) revert BadState();
+        if (c.state != ClaimState.Listed) revert BadState();
         if (evidence.length > 4096) revert EvidenceTooLarge();
 
-        Bounty storage b = bounties[c.bountyId];
-        Game storage g = games[b.gameId];
+        Game storage g = games[c.gameId];
         if (block.timestamp < g.lockTime) revert LockNotReached();
 
         // Past the slash deadline a claim is no longer revealable, only slashable.
@@ -504,7 +578,7 @@ contract SealedAvailabilityMarket {
             }
         }
 
-        bytes32 expected = keccak256(abi.encode(c.bountyId, claimed, bucket, keccak256(evidence), salt));
+        bytes32 expected = keccak256(abi.encode(c.gameId, c.playerId, claimed, bucket, keccak256(evidence), salt));
         if (expected != c.commitHash) revert CommitMismatch();
 
         // The confidence schedule is enforced here, where the bucket finally becomes public.
@@ -518,7 +592,7 @@ contract SealedAvailabilityMarket {
     }
 
     // -----------------------------------------------------------------------
-    // Resolver
+    // Attester
     // -----------------------------------------------------------------------
 
     /// @notice One attestation settles every claim on the game.
@@ -541,10 +615,15 @@ contract SealedAvailabilityMarket {
         emit Attested(gameId, reportHash, inactivePlayerIds);
     }
 
-    /// @notice Owner escape hatch, valid only inside the challenge window.
+    /**
+     * @notice Owner escape hatch, valid only inside the challenge window.
+     * @dev A voided game is never final and cannot be re-attested. Its only exit is
+     *      `forceUnwind`, which returns every bond and escrow with nobody scored.
+     */
     function voidAttestation(bytes32 gameId) external onlyOwner {
         Game storage g = games[gameId];
         if (g.attestedAt == 0) revert NotAttested();
+        if (g.voided) revert BadState();
         if (block.timestamp >= uint256(g.attestedAt) + challengeWindow) revert ChallengeWindowClosed();
         g.voided = true;
         emit AttestationVoided(gameId);
@@ -555,17 +634,17 @@ contract SealedAvailabilityMarket {
     // -----------------------------------------------------------------------
 
     /**
-     * @notice Permissionlessly abandon a game the operator never attested.
+     * @notice Permissionlessly abandon a game the operator never (validly) attested.
      *
-     * Callable by anyone once `lockTime + unwindDelay` has passed with no attestation. It
-     * does not decide any outcome — nobody knows the outcome, which is the whole problem —
-     * it simply opens the door for every participant to take their own money back.
+     * Callable by anyone once `lockTime + unwindDelay` has passed with no live attestation.
+     * It does not decide any outcome — it simply opens the door for every participant to
+     * take their own money back.
      */
     function forceUnwind(bytes32 gameId) external {
         Game storage g = games[gameId];
         if (g.lockTime == 0) revert NoGame();
         if (g.unwound) revert AlreadyUnwound();
-        if (g.attestedAt != 0) revert AlreadyAttested();
+        if (g.attestedAt != 0 && !g.voided) revert AlreadyAttested();
         if (block.timestamp <= uint256(g.lockTime) + unwindDelay) revert UnwindTooEarly();
 
         g.unwound = true;
@@ -573,63 +652,54 @@ contract SealedAvailabilityMarket {
     }
 
     /**
-     * @notice Return one claim's bond to its seller and its escrow to its buyer.
+     * @notice Return one listing's bond to its seller. Purchases are returned to their
+     *         buyers through `resolvePurchase`.
      * @dev No ClaimSettled is emitted and no bond is burned: the outcome is unknown, so
      *      nobody is scored and nobody is punished. An unwound game is a non-event.
      */
     function unwindClaim(uint64 claimId) external {
         Claim storage c = claims[claimId];
         if (c.seller == address(0)) revert NoClaim();
+        if (!games[c.gameId].unwound) revert NotUnwound();
+        if (c.state != ClaimState.Listed && c.state != ClaimState.Revealed) revert BadState();
 
-        Bounty storage b = bounties[c.bountyId];
-        if (!games[b.gameId].unwound) revert NotUnwound();
-        if (
-            c.state == ClaimState.SettledCorrect || c.state == ClaimState.SettledWrong
-                || c.state == ClaimState.Slashed || c.state == ClaimState.RefundedUndelivered
-                || c.state == ClaimState.Unwound
-        ) revert BadState();
-
-        uint96 escrow = c.escrow;
-        c.escrow = 0;
         c.state = ClaimState.Unwound;
-
         balances[c.seller] += c.bond;
-        if (escrow != 0) balances[b.buyer] += escrow;
 
-        emit ClaimUnwound(claimId, c.seller, c.bond, escrow);
+        emit ClaimUnwound(claimId, c.seller, c.bond);
     }
 
     // -----------------------------------------------------------------------
     // Permissionless cranks
     // -----------------------------------------------------------------------
 
+    /**
+     * @notice Settle one revealed listing against the attested list.
+     * @dev Decides correct/wrong once, moves the bond, and fixes `payoutBps` — the share of
+     *      each buyer's escrow the seller has earned. Individual escrows then move through
+     *      `resolvePurchase`, one per buyer, so a listing with many buyers settles in O(1).
+     */
     function settle(uint64 claimId) external {
         Claim storage c = claims[claimId];
         if (c.seller == address(0)) revert NoClaim();
         if (c.state != ClaimState.Revealed) revert BadState();
 
-        Bounty storage b = bounties[c.bountyId];
-        Game storage g = games[b.gameId];
-        if (!isFinal(b.gameId)) revert NotFinal();
+        Game storage g = games[c.gameId];
+        if (!isFinal(c.gameId)) revert NotFinal();
 
-        Outcome actual = inactive[b.gameId][b.playerId] ? Outcome.INACTIVE : Outcome.ACTIVE;
+        Outcome actual = inactive[c.gameId][c.playerId] ? Outcome.INACTIVE : Outcome.ACTIVE;
         bool correct = (c.claimed == actual);
 
-        // Escrow is whatever was actually deposited at purchase — 0 for an unsold claim.
-        // It must be read before the state transition, and zeroed to prevent double release.
-        uint96 escrow = c.escrow;
-        c.escrow = 0;
-
-        uint96 escrowReleased;
+        uint16 payoutBps;
         if (correct) {
+            payoutBps = payoutBpsFor(c.committedAt, g.lockTime, c.priorTag, c.priorPractice, actual);
             c.state = ClaimState.SettledCorrect;
-            escrowReleased = escrow;
-            balances[c.seller] += uint256(c.bond) + uint256(escrow);
+            balances[c.seller] += c.bond;
         } else {
             c.state = ClaimState.SettledWrong;
             balances[burnSink] += c.bond;
-            balances[b.buyer] += escrow;
         }
+        c.payoutBps = payoutBps;
 
         emit ClaimSettled(
             claimId,
@@ -642,32 +712,61 @@ contract SealedAvailabilityMarket {
             c.committedAt,
             g.lockTime,
             c.bond,
-            escrowReleased
+            payoutBps
         );
     }
 
-    /// @notice Bond forfeit for any claim that never revealed. Makes misses unhideable.
-    function slashUnrevealed(uint64 claimId) external {
+    /**
+     * @notice Move one buyer's escrow after the listing reached a terminal state.
+     *
+     *   never delivered      → fee + contingent back to the buyer, whatever happened
+     *   correct              → contingent × payoutBps to the seller, remainder to the buyer
+     *   wrong/slashed/unwound → contingent back to the buyer
+     */
+    function resolvePurchase(uint64 claimId, address buyer) external {
         Claim storage c = claims[claimId];
         if (c.seller == address(0)) revert NoClaim();
         if (
-            c.state != ClaimState.Committed && c.state != ClaimState.Purchased
-                && c.state != ClaimState.KeyDelivered
+            c.state != ClaimState.SettledCorrect && c.state != ClaimState.SettledWrong
+                && c.state != ClaimState.Slashed && c.state != ClaimState.Unwound
         ) revert BadState();
 
-        Bounty storage b = bounties[c.bountyId];
-        Game storage g = games[b.gameId];
-        if (!isFinal(b.gameId)) revert NotFinal();
+        Purchase storage p = purchases[claimId][buyer];
+        if (p.state != PurchaseState.Paid && p.state != PurchaseState.KeyDelivered) revert BadState();
+
+        uint96 toSeller;
+        uint96 toBuyer;
+        if (p.state == PurchaseState.Paid) {
+            // The fee was never credited (no delivery), so both legs return.
+            toBuyer = p.revealFee + p.contingent;
+        } else if (c.state == ClaimState.SettledCorrect) {
+            toSeller = uint96((uint256(p.contingent) * c.payoutBps) / 10_000);
+            toBuyer = p.contingent - toSeller;
+        } else {
+            toBuyer = p.contingent;
+        }
+        p.state = PurchaseState.Resolved;
+
+        if (toSeller != 0) balances[c.seller] += toSeller;
+        if (toBuyer != 0) balances[buyer] += toBuyer;
+
+        emit PurchaseResolved(claimId, buyer, toSeller, toBuyer);
+    }
+
+    /// @notice Bond forfeit for any listing that never revealed. Makes misses unhideable.
+    function slashUnrevealed(uint64 claimId) external {
+        Claim storage c = claims[claimId];
+        if (c.seller == address(0)) revert NoClaim();
+        if (c.state != ClaimState.Listed) revert BadState();
+
+        Game storage g = games[c.gameId];
+        if (!isFinal(c.gameId)) revert NotFinal();
         if (block.timestamp <= uint256(g.attestedAt) + challengeWindow + revealWindow) {
             revert RevealWindowOpen();
         }
 
-        uint96 escrow = c.escrow;
-        c.escrow = 0;
-
         c.state = ClaimState.Slashed;
         balances[burnSink] += c.bond;
-        balances[b.buyer] += escrow;
 
         emit ClaimSlashed(claimId, c.seller, c.bond);
     }
@@ -679,6 +778,76 @@ contract SealedAvailabilityMarket {
         (bool ok,) = msg.sender.call{value: amount}("");
         if (!ok) revert TransferFailed();
         emit Withdrawn(msg.sender, amount);
+    }
+
+    // -----------------------------------------------------------------------
+    // Pricing (pure/view) — agents/src/lib/scoring.ts mirrors the prior table
+    // -----------------------------------------------------------------------
+
+    /**
+     * P(ACTIVE) in basis points given the public designation and last practice status.
+     * Illustrative seed constants, identical to the off-chain scorer's PRIOR_TABLE.
+     */
+    function priorActiveBps(ReportTag tag, Practice practice) public pure returns (uint16) {
+        if (tag == ReportTag.NONE) {
+            if (practice == Practice.FULL) return 9800;
+            if (practice == Practice.LIMITED) return 9000;
+            if (practice == Practice.DNP) return 7000;
+            return 9500;
+        }
+        if (tag == ReportTag.PROBABLE) {
+            if (practice == Practice.FULL) return 9500;
+            if (practice == Practice.LIMITED) return 8500;
+            if (practice == Practice.DNP) return 6500;
+            return 8800;
+        }
+        if (tag == ReportTag.QUESTIONABLE) {
+            if (practice == Practice.FULL) return 8500;
+            if (practice == Practice.LIMITED) return 7000;
+            if (practice == Practice.DNP) return 4500;
+            return 7200;
+        }
+        if (tag == ReportTag.DOUBTFUL) {
+            if (practice == Practice.FULL) return 1500;
+            if (practice == Practice.LIMITED) return 800;
+            if (practice == Practice.DNP) return 300;
+            return 800;
+        }
+        // OUT
+        if (practice == Practice.FULL) return 200;
+        if (practice == Practice.LIMITED) return 200;
+        if (practice == Practice.DNP) return 100;
+        return 200;
+    }
+
+    /// w = 0.1 + 0.9 * min(1, leadTime / leadSaturation), in basis points.
+    function leadWeightBps(uint64 committedAt, uint64 lockTime) public view returns (uint16) {
+        uint256 lead = lockTime > committedAt ? lockTime - committedAt : 0;
+        if (lead > leadSaturation) lead = leadSaturation;
+        return uint16(1000 + (9000 * lead) / leadSaturation);
+    }
+
+    /**
+     * How surprising the actual outcome was, given the public prior at commit time.
+     * Full credit (10000) when the public gave the outcome a coin flip or worse; near zero
+     * when the seller merely restated an obvious report.
+     *
+     *   surprise = min(1, 2 * (1 - P_public(actual)))
+     */
+    function surpriseBps(ReportTag tag, Practice practice, Outcome actual) public pure returns (uint16) {
+        uint256 pActive = priorActiveBps(tag, practice);
+        uint256 py = actual == Outcome.ACTIVE ? pActive : 10_000 - pActive;
+        uint256 s = 2 * (10_000 - py);
+        return uint16(s > 10_000 ? 10_000 : s);
+    }
+
+    /// The share of each escrow a correct seller earns: lead weight × surprise.
+    function payoutBpsFor(uint64 committedAt, uint64 lockTime, ReportTag tag, Practice practice, Outcome actual)
+        public
+        view
+        returns (uint16)
+    {
+        return uint16((uint256(leadWeightBps(committedAt, lockTime)) * surpriseBps(tag, practice, actual)) / 10_000);
     }
 
     // -----------------------------------------------------------------------
@@ -695,5 +864,4 @@ contract SealedAvailabilityMarket {
     function bondFor(Bucket bucket) public view returns (uint96) {
         return uint96(uint256(baseBond) << uint256(bucket));
     }
-
 }

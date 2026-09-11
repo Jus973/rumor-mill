@@ -3,14 +3,16 @@
  *
  * Implements LLD §3.6. The seal is deliberately TWO-STEP:
  *
- *   fill time     ciphertext = AES-256-GCM(K, payload)      emitted in ClaimCommitted (public)
- *   purchase      buyer pays
- *   key delivery  encKey     = ECIES(buyerPubKey, K)        emitted in KeyDelivered
+ *   listing       ciphertext = AES-256-GCM(K, payload)      emitted in ClaimListed (public)
+ *   purchase      a buyer pays
+ *   key delivery  encKey     = ECIES(buyerPubKey, K)        emitted in KeyDelivered, per buyer
  *
- * Encrypting the payload straight to the buyer's key at fill time would let the buyer
- * read it without paying. Withholding K is what makes the claim *sold* rather than
- * *published*. The ciphertext is public and pre-committed from the moment of the fill,
- * so the seller cannot swap the content after seeing who bought it.
+ * Encrypting the payload straight to a buyer's key at listing time would let that buyer
+ * read it without paying — and there is no single buyer at listing time anyway. Withholding
+ * K is what makes the claim *sold* rather than *published*. One K opens the listing for
+ * every buyer; each buyer receives it wrapped to their own pubkey. The ciphertext is public
+ * and pre-committed from the moment of the listing, so the seller cannot swap the content
+ * after seeing who bought it.
  */
 
 import { gcm } from '@noble/ciphers/aes';
@@ -30,7 +32,7 @@ import {
 // Enums — declared once in enums.ts, re-exported here for convenience.
 // ---------------------------------------------------------------------------
 
-export { Outcome, Bucket, ReportTag, Practice, ClaimState } from './enums.js';
+export { Outcome, Bucket, ReportTag, Practice, ClaimState, PurchaseState } from './enums.js';
 import { Outcome, Bucket } from './enums.js';
 
 export interface EvidenceItem {
@@ -39,10 +41,11 @@ export interface EvidenceItem {
   text: string;
 }
 
-/** The plaintext that is sealed at fill time and forced public at reveal (LLD §6). */
+/** The plaintext that is sealed at listing and forced public at reveal. */
 export interface ClaimPayload {
-  v: 1;
-  bountyId: number;
+  v: 2;
+  gameId: Hex;
+  playerId: Hex;
   claimed: Outcome;
   bucket: Bucket;
   evidence: EvidenceItem[];
@@ -185,11 +188,12 @@ export function decodePayload(bytes: Uint8Array): ClaimPayload {
 }
 
 /**
- * commitHash = keccak256(abi.encode(bountyId, claimed, bucket, keccak256(evidence), salt))
- * Mirrors the contract's check in `reveal` exactly (LLD §3.5, §3.6).
+ * commitHash = keccak256(abi.encode(gameId, playerId, claimed, bucket, keccak256(evidence), salt))
+ * Mirrors the contract's check in `reveal` exactly.
  */
 export function computeCommitHash(args: {
-  bountyId: number | bigint;
+  gameId: Hex;
+  playerId: Hex;
   claimed: Outcome;
   bucket: Bucket;
   evidenceBytes: Uint8Array;
@@ -199,13 +203,14 @@ export function computeCommitHash(args: {
   return keccak256(
     encodeAbiParameters(
       [
-        { type: 'uint64' },
+        { type: 'bytes32' },
+        { type: 'bytes32' },
         { type: 'uint8' },
         { type: 'uint8' },
         { type: 'bytes32' },
         { type: 'bytes32' },
       ],
-      [BigInt(args.bountyId), args.claimed, args.bucket, evidenceHash, args.salt],
+      [args.gameId, args.playerId, args.claimed, args.bucket, evidenceHash, args.salt],
     ),
   );
 }
@@ -217,7 +222,7 @@ export function computeCommitHash(args: {
 export interface SealedClaim {
   /** Withheld until the buyer pays. This is the thing being sold. */
   key: Uint8Array;
-  /** Public from the moment of the fill; emitted in ClaimCommitted. */
+  /** Public from the moment of the listing; emitted in ClaimListed. */
   ciphertext: Uint8Array;
   /** Stored on-chain; binds the seller to this payload before lock. */
   commitHash: Hex;
@@ -225,7 +230,7 @@ export interface SealedClaim {
   evidenceBytes: Uint8Array;
 }
 
-/** SELLER, at fillBounty. Produces the public ciphertext and the withheld key K. */
+/** SELLER, at listClaim. Produces the public ciphertext and the withheld key K. */
 export function sealClaim(payload: ClaimPayload): SealedClaim {
   const evidenceBytes = encodeEvidence(payload.evidence);
   if (evidenceBytes.length > MAX_EVIDENCE_BYTES) {
@@ -236,7 +241,8 @@ export function sealClaim(payload: ClaimPayload): SealedClaim {
   const key = randomSymmetricKey();
   const ciphertext = aesGcmEncrypt(key, encodePayload(payload));
   const commitHash = computeCommitHash({
-    bountyId: payload.bountyId,
+    gameId: payload.gameId,
+    playerId: payload.playerId,
     claimed: payload.claimed,
     bucket: payload.bucket,
     evidenceBytes,
@@ -245,7 +251,7 @@ export function sealClaim(payload: ClaimPayload): SealedClaim {
   return { key, ciphertext, commitHash, evidenceBytes };
 }
 
-/** SELLER, at deliverKey — only after ClaimPurchased. Wraps K to the buyer's pubkey. */
+/** SELLER, at deliverKey — once per ClaimPurchased. Wraps K to that buyer's pubkey. */
 export function wrapKeyForBuyer(buyerPubKey: Hex, key: Uint8Array): Uint8Array {
   if (key.length !== KEY_LEN) throw new Error(`key must be ${KEY_LEN} bytes`);
   return eciesEncrypt(buyerPubKey, key);
@@ -265,7 +271,8 @@ export function openClaim(args: {
   const key = eciesDecrypt(args.buyerPrivKey, args.encKey);
   const payload = decodePayload(aesGcmDecrypt(key, args.ciphertext));
   const recomputed = computeCommitHash({
-    bountyId: payload.bountyId,
+    gameId: payload.gameId,
+    playerId: payload.playerId,
     claimed: payload.claimed,
     bucket: payload.bucket,
     evidenceBytes: encodeEvidence(payload.evidence),

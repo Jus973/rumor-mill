@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { keccak256, toHex } from 'viem';
 import {
   Outcome,
   Bucket,
@@ -17,10 +18,14 @@ import {
   type ClaimPayload,
 } from '../src/lib/crypto.js';
 
+const GAME = keccak256(toHex('NFL2026W1SFSEA'));
+const PLAYER = keccak256(toHex('NFLSFcmc'));
+
 function samplePayload(overrides: Partial<ClaimPayload> = {}): ClaimPayload {
   return {
-    v: 1,
-    bountyId: 3,
+    v: 2,
+    gameId: GAME,
+    playerId: PLAYER,
     claimed: Outcome.INACTIVE,
     bucket: Bucket.B83,
     evidence: [
@@ -109,7 +114,8 @@ describe('commitment binding — seller cannot swap content after the fill', () 
   const fields: Array<[string, Partial<ClaimPayload>]> = [
     ['claimed', { claimed: Outcome.ACTIVE }],
     ['bucket', { bucket: Bucket.B95 }],
-    ['bountyId', { bountyId: 4 }],
+    ['gameId', { gameId: keccak256(toHex('NFL2026W2SFSEA')) }],
+    ['playerId', { playerId: keccak256(toHex('NFLSFdeebo')) }],
     ['salt', { salt: randomSalt() }],
     ['evidence', { evidence: [{ source: 'national', ts: 1757000001, text: 'different' }] }],
   ];
@@ -121,7 +127,8 @@ describe('commitment binding — seller cannot swap content after the fill', () 
       const tampered = { ...original, ...override };
 
       const rehashed = computeCommitHash({
-        bountyId: tampered.bountyId,
+        gameId: tampered.gameId,
+        playerId: tampered.playerId,
         claimed: tampered.claimed,
         bucket: tampered.bucket,
         evidenceBytes: encodeEvidence(tampered.evidence),
@@ -167,20 +174,38 @@ describe('canonical encoding — seller and buyer must agree byte-for-byte', () 
   it('commit hash is stable across reserializations', () => {
     const payload = samplePayload();
     const h1 = computeCommitHash({
-      bountyId: payload.bountyId,
+      gameId: payload.gameId,
+      playerId: payload.playerId,
       claimed: payload.claimed,
       bucket: payload.bucket,
       evidenceBytes: encodeEvidence(payload.evidence),
       salt: payload.salt,
     });
     const h2 = computeCommitHash({
-      bountyId: payload.bountyId,
+      gameId: payload.gameId,
+      playerId: payload.playerId,
       claimed: payload.claimed,
       bucket: payload.bucket,
       evidenceBytes: encodeEvidence(JSON.parse(JSON.stringify(payload.evidence))),
       salt: payload.salt,
     });
     expect(h1).toBe(h2);
+  });
+
+  it('matches the Solidity vector pinned in test/SAM.t.sol', () => {
+    // test_CommitHashMatchesTypeScriptVector hashes this exact tuple on-chain.
+    const evidenceBytes = encodeEvidence([
+      { source: 'local-beat', ts: 1757000000, text: 'CMC absent, second straight day' },
+    ]);
+    const h = computeCommitHash({
+      gameId: GAME,
+      playerId: PLAYER,
+      claimed: Outcome.INACTIVE,
+      bucket: Bucket.B83,
+      evidenceBytes,
+      salt: '0x00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff',
+    });
+    expect(h).toBe('0x8d52a90768cbf26fa1da1f49c8438ba19159cbda2eb62df99d92048629d1155d');
   });
 
   it('rejects evidence larger than the on-chain cap', () => {

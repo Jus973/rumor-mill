@@ -93,13 +93,14 @@ export interface SettledEvent {
   committedAt: number;
   lockTime: number;
   bond: bigint;
-  escrowReleased: bigint;
+  /** Share of each buyer's escrow the seller earned (on-chain price multiplier). */
+  payoutBps: number;
 }
 
 /**
- * `ClaimSlashed` carries the seller. `ClaimRefunded` does NOT (see §3.4), so the indexer
- * joins it against `ClaimCommitted` on claimId before it reaches this module — see
- * `attributeRefunds` below.
+ * `ClaimSlashed` carries the seller. `PurchaseRefunded` does NOT, so the indexer joins it
+ * against `ClaimListed` on claimId before it reaches this module — see `attributeRefunds`
+ * below. A listing with several undelivered buyers is penalised once, not once per buyer.
  */
 export interface PenaltyEvent {
   claimId: number;
@@ -244,18 +245,23 @@ export function ledger(input: {
 }
 
 /**
- * `ClaimRefunded` has no seller field on-chain, so attribute it via the claimId -> seller
- * map built from `ClaimCommitted`. Claims with no known seller are dropped rather than
- * silently mis-attributed.
+ * `PurchaseRefunded` has no seller field on-chain, so attribute it via the claimId -> seller
+ * map built from `ClaimListed`. Claims with no known seller are dropped rather than
+ * silently mis-attributed, and repeated refunds on one listing collapse to one penalty.
+ * The bond is not burned by a refund, so the penalty is reputational only (bond = 0).
  */
 export function attributeRefunds(
   refunded: Array<{ claimId: number; bond: bigint }>,
   sellerOfClaim: Map<number, string>,
 ): PenaltyEvent[] {
   const out: PenaltyEvent[] = [];
+  const seen = new Set<number>();
   for (const r of refunded) {
+    if (seen.has(r.claimId)) continue;
     const seller = sellerOfClaim.get(r.claimId);
-    if (seller) out.push({ claimId: r.claimId, seller, bond: r.bond, kind: 'refunded' });
+    if (!seller) continue;
+    seen.add(r.claimId);
+    out.push({ claimId: r.claimId, seller, bond: r.bond, kind: 'refunded' });
   }
   return out;
 }

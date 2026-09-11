@@ -1,5 +1,5 @@
 /**
- * resolver.ts — the bonded attester (LLD §4.1).
+ * resolver.ts — the operator's scheduler + attester duties.
  *
  * THE primary trust assumption (HLD): a single key decides what the official list said.
  * It is bounded here by the challenge-window timelock (`settle` cannot run until
@@ -43,7 +43,7 @@ export class Resolver {
       })),
     );
     this.fixture.games.forEach((g, i) =>
-      act('RESOLVER', `createGame ${g.label} lock=+${g.lockTime - this.fixture.t0}s`, results[i].hash),
+      act('OPERATOR', `createGame ${g.label} lock=+${g.lockTime - this.fixture.t0}s`, results[i].hash),
     );
   }
 
@@ -63,7 +63,7 @@ export class Resolver {
       })),
     );
     this.fixture.games.forEach((g, i) =>
-      act('RESOLVER', `setPriorBatch ${g.label} (${g.players.length} players)`, results[i].hash),
+      act('OPERATOR', `setPriorBatch ${g.label} (${g.players.length} players)`, results[i].hash),
     );
   }
 
@@ -100,7 +100,7 @@ export class Resolver {
       functionName: 'attest',
       args: [g.gameId, reportHash, ids],
     });
-    act('RESOLVER', `attest ${g.label} inactive=[${snapshot.inactive.map((p) => p.slug).join(', ') || '—'}]`, hash);
+    act('OPERATOR', `attest ${g.label} inactive=[${snapshot.inactive.map((p) => p.slug).join(', ') || '—'}]`, hash);
     info(`snapshot → ${path}  reportHash=${reportHash.slice(0, 18)}…  (rehash to verify)`);
   }
 
