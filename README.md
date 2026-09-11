@@ -16,6 +16,7 @@ Buyers are those who will use this information for personal benefit
 - Reputation is earned for being right early and against the public report.
 - Contracts are locked at lineup lock (90 minutes before an actual game)
 - Price is compared to oracle-driven truth values; there is a surprise factor that incentivizes sellers to give nicher information
+- The earlier you send your information as compared to lineup lock, the price is set to be higher 
 - 
 
 
@@ -102,6 +103,63 @@ ledger from `agents/src/lib/scoring.ts`.
 | same call, 96h earlier | 0.70 | 96h | +1.012 |
 | same call, **wrong** | 0.70 | 96h | −1.386 + burned bond |
 | never revealed | — | — | **−2.996** |
+
+## Running the demo
+
+```bash
+forge test                                  # 19 contract tests
+cd agents && npm install && npm test        # 37 crypto + scoring tests
+```
+
+Copy `.env.example` to `.env` in the repo root and fill it in — it is read automatically, no
+`source` needed. Then `npm run keys` in `agents/` to generate the agent wallets, and fund the
+three printed addresses with ~0.05 Sepolia ETH each.
+
+### Interactive: three terminals (the one to record)
+
+Each terminal is a stakeholder you drive by typing commands, so you can steer the scenario
+live — sell a claim, buy it, and decide whether it turns out right or wrong.
+
+```bash
+npm run operator                    # terminal 1 — the manager
+npm run seller                      # terminal 2 — aggregator (scrapes local reporting)
+npm run buyer                       # terminal 3 — lineup optimizer
+SELLER=forecaster npm run seller    # optional — the model seller
+```
+
+A full scenario:
+
+| Terminal | Command | What it shows |
+|---|---|---|
+| operator | `open` | publishes the slate and the public injury report |
+| buyer | `bounty` | posts a bounty per uncertain slot |
+| seller | `scan` | what the wires say, and what it implies |
+| seller | `sell cmc` | fills with a **sealed** claim — content hidden, bond posted |
+| seller | `sell dk INACTIVE B83` | override the strategy and claim by hand |
+| buyer | `offers` | sees ciphertext byte counts and seller reputation — *not* content |
+| buyer | `buy 7` | pays; still cannot read it |
+| seller | `deliver` | sends `ECIES(buyerPubKey, K)` — **this** is the sale |
+| buyer | `open` then `decide` | decrypts, verifies against the commitment, ensembles into START/BENCH |
+| seller | `sell kelce ...` | after lock: `LOCKED 4s ago — fills revert at the cliff` |
+| operator | `attest SEA@SF cmc` | **manual override** — you declare who was inactive |
+| seller | `hold 9` then `reveal` | refuse one reveal; that claim gets slashed |
+| operator | `settle`, `slash`, `fees` | settles, burns forfeited bonds, collects the take |
+
+`attest <game> [slugs...]` is the manual override: whatever you type becomes ground truth,
+which is how you make a seller right or wrong on camera. `oracle <game>` attests from the
+fixture feed instead. `unwind <game>` demonstrates the escape hatch. Every terminal has
+`status` and `help`.
+
+### Autonomous
+
+`npm run demo` runs the whole lifecycle as one orchestrated process (~4m40s). The four
+stakeholders can also run as independent daemons — `auto:manager`, `auto:scraper`,
+`auto:forecaster`, `auto:buyer` — sharing no state and coordinating only through `getLogs`.
+Each derives `t0` from the chain (the game's on-chain `lockTime` minus the lock offset), so
+processes started at different moments still agree on what has broken.
+
+Every demo is re-runnable: `open` advances to a fresh synthetic week, since `gameId` is
+deterministic from `(season, week, teams)`.
 
 ## Known gaps
 
