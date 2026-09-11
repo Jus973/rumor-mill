@@ -120,9 +120,24 @@ contract SealedAvailabilityMarket {
     uint64 public nextBountyId = 1;
     uint64 public nextClaimId = 1;
 
-    address public immutable resolver;
+    /// Sets the slate and publishes the public priors. Never decides outcomes.
+    address public immutable scheduler;
+    /// Decides outcomes, and nothing else. In production this is an oracle adapter.
+    address public immutable attester;
     address public immutable owner;
     address public immutable burnSink;
+    /// Market operator. Earns the protocol fee; in this deployment also scheduler+attester.
+    address public immutable feeRecipient;
+    /**
+     * Protocol fee, in basis points of the reveal fee, taken when the key is delivered.
+     *
+     * Deliberately charged on the SALE and never on the settlement outcome. The operator is
+     * also the attester, so any fee that varied with whether claims settle correct or wrong
+     * would pay them to attest falsely. A cut of burned bonds would be worst of all: it
+     * would make the oracle profit from sellers being wrong. This fee is fixed at the moment
+     * the key changes hands, before any outcome exists.
+     */
+    uint16 public immutable protocolFeeBps;
     uint96 public immutable baseBond;
     uint64 public immutable challengeWindow;
     uint64 public immutable revealWindow;
@@ -156,6 +171,7 @@ contract SealedAvailabilityMarket {
     );
     event ClaimPurchased(uint64 indexed claimId, address indexed buyer);
     event KeyDelivered(uint64 indexed claimId, bytes encKey);
+    event ProtocolFeeAccrued(uint64 indexed claimId, address indexed recipient, uint96 amount);
     event Attested(bytes32 indexed gameId, bytes32 reportHash, bytes32[] inactivePlayerIds);
     event AttestationVoided(bytes32 indexed gameId);
     event ClaimRevealed(uint64 indexed claimId, Outcome claimed, Bucket bucket, bytes evidence);
@@ -180,7 +196,8 @@ contract SealedAvailabilityMarket {
     // Errors
     // -----------------------------------------------------------------------
 
-    error NotResolver();
+    error NotScheduler();
+    error NotAttester();
     error NotOwner();
     error NotSeller();
     error NotBuyer();
@@ -211,8 +228,21 @@ contract SealedAvailabilityMarket {
     // Modifiers
     // -----------------------------------------------------------------------
 
-    modifier onlyResolver() {
-        if (msg.sender != resolver) revert NotResolver();
+    /**
+     * Scheduling and attesting are deliberately SEPARATE roles.
+     *
+     * Scoring is `Δ = w * (ln(qy) - ln(py))`, where `py` comes from the prior snapshot and
+     * `qy` from the outcome. A single key holding both roles could move any seller's
+     * reputation by rewriting what was "publicly known" at commit time, not just by lying
+     * about who sat out. Splitting them means the oracle decides outcomes and nothing else.
+     */
+    modifier onlyScheduler() {
+        if (msg.sender != scheduler) revert NotScheduler();
+        _;
+    }
+
+    modifier onlyAttester() {
+        if (msg.sender != attester) revert NotAttester();
         _;
     }
 
@@ -229,16 +259,23 @@ contract SealedAvailabilityMarket {
     }
 
     constructor(
-        address _resolver,
+        address _scheduler,
+        address _attester,
         address _owner,
         address _burnSink,
+        address _feeRecipient,
+        uint16 _protocolFeeBps,
         uint96 _baseBond,
         uint64 _challengeWindow,
         uint64 _revealWindow
     ) {
-        resolver = _resolver;
+        scheduler = _scheduler;
+        attester = _attester;
         owner = _owner;
         burnSink = _burnSink;
+        feeRecipient = _feeRecipient;
+        if (_protocolFeeBps > 1000) revert BadValue(); // hard cap at 10%
+        protocolFeeBps = _protocolFeeBps;
         baseBond = _baseBond;
         challengeWindow = _challengeWindow;
         revealWindow = _revealWindow;
@@ -248,7 +285,7 @@ contract SealedAvailabilityMarket {
     // Setup (resolver)
     // -----------------------------------------------------------------------
 
-    function createGame(bytes32 gameId, uint64 lockTime) external onlyResolver {
+    function createGame(bytes32 gameId, uint64 lockTime) external onlyScheduler {
         if (games[gameId].lockTime != 0) revert GameExists();
         if (lockTime <= block.timestamp) revert LockPassed();
         games[gameId].lockTime = lockTime;
@@ -257,7 +294,7 @@ contract SealedAvailabilityMarket {
 
     function setPrior(bytes32 gameId, bytes32 playerId, ReportTag tag, Practice practice)
         public
-        onlyResolver
+        onlyScheduler
     {
         if (games[gameId].lockTime == 0) revert NoGame();
         priors[gameId][playerId] = Prior({tag: tag, practice: practice, updatedAt: uint64(block.timestamp)});
@@ -269,7 +306,7 @@ contract SealedAvailabilityMarket {
         bytes32[] calldata playerIds,
         ReportTag[] calldata tags,
         Practice[] calldata practices
-    ) external onlyResolver {
+    ) external onlyScheduler {
         if (playerIds.length != tags.length || playerIds.length != practices.length) revert BadValue();
         for (uint256 i; i < playerIds.length; ++i) {
             setPrior(gameId, playerIds[i], tags[i], practices[i]);
@@ -409,7 +446,14 @@ contract SealedAvailabilityMarket {
         if (block.timestamp >= games[b.gameId].lockTime) revert LockPassed();
 
         c.state = ClaimState.KeyDelivered;
-        balances[c.seller] += b.revealFee;
+
+        // Outcome-independent protocol fee, taken from the seller's proceeds on the sale.
+        uint96 fee = uint96((uint256(b.revealFee) * protocolFeeBps) / 10_000);
+        if (fee != 0) {
+            balances[feeRecipient] += fee;
+            emit ProtocolFeeAccrued(claimId, feeRecipient, fee);
+        }
+        balances[c.seller] += uint256(b.revealFee) - fee;
 
         emit KeyDelivered(claimId, encKeyForBuyer);
     }
@@ -459,7 +503,7 @@ contract SealedAvailabilityMarket {
     /// @notice One attestation settles every claim on the game.
     function attest(bytes32 gameId, bytes32 reportHash, bytes32[] calldata inactivePlayerIds)
         external
-        onlyResolver
+        onlyAttester
     {
         Game storage g = games[gameId];
         if (g.lockTime == 0) revert NoGame();

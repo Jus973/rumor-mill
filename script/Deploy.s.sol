@@ -28,20 +28,31 @@ contract Deploy is Script {
         uint64 challengeWindow = uint64(vm.envOr("CHALLENGE_WINDOW", uint256(60)));
         uint64 revealWindow = uint64(vm.envOr("REVEAL_WINDOW", uint256(240)));
         address burnSink = vm.envOr("BURN_SINK", address(0x000000000000000000000000000000000000dEaD));
+        // Operator take rate on the reveal fee (outcome-independent). 250 bps = 2.5%.
+        uint16 protocolFeeBps = uint16(vm.envOr("PROTOCOL_FEE_BPS", uint256(250)));
 
-        // resolver == owner == deployer for the take-home; this is the primary trust
-        // assumption and the README says so explicitly.
+        // The attester defaults to the deployer so the market can be deployed before the
+        // oracle adapter exists (the adapter needs the market's address). Set ATTESTER to
+        // the UmaAttester address to source outcomes from UMA instead.
+        address attester = vm.envOr("ATTESTER", deployer);
+
         vm.startBroadcast(pk);
-        SealedAvailabilityMarket market =
-            new SealedAvailabilityMarket(deployer, deployer, burnSink, baseBond, challengeWindow, revealWindow);
+        SealedAvailabilityMarket market = new SealedAvailabilityMarket(
+            deployer, attester, deployer, burnSink, deployer, protocolFeeBps, baseBond,
+            challengeWindow, revealWindow
+        );
         vm.stopBroadcast();
 
         console.log("=====================================================");
         console.log("SealedAvailabilityMarket:", address(market));
         console.log("deployBlock:            ", block.number);
         console.log("chainId:                ", block.chainid);
-        console.log("resolver == owner:      ", deployer);
+        console.log("scheduler:              ", deployer);
+        console.log("attester:               ", attester);
+        console.log("owner:                  ", deployer);
         console.log("burnSink:               ", burnSink);
+        console.log("feeRecipient:           ", deployer);
+        console.log("protocolFeeBps:         ", protocolFeeBps);
         console.log("baseBond (wei):         ", baseBond);
         console.log("challengeWindow (s):    ", challengeWindow);
         console.log("revealWindow (s):       ", revealWindow);

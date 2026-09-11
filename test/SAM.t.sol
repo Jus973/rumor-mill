@@ -8,12 +8,15 @@ import {SealedAvailabilityMarket as SAM} from "../src/SealedAvailabilityMarket.s
 contract SAMTest is Test {
     SAM market;
 
-    address resolver = makeAddr("resolver");
+    address scheduler = makeAddr("scheduler");
+    address attester = makeAddr("attester");
+    address operator = makeAddr("operator");
     address owner = makeAddr("owner");
     address burnSink = address(0xdEaD);
     address buyer = makeAddr("buyer");
     address seller = makeAddr("seller");
 
+    uint16 constant FEE_BPS = 250; // 2.5%
     uint96 constant BASE_BOND = 0.0005 ether;
     uint64 constant CHALLENGE = 60;
     uint64 constant REVEAL_W = 240;
@@ -31,12 +34,12 @@ contract SAMTest is Test {
 
     function setUp() public {
         vm.warp(1_000_000);
-        market = new SAM(resolver, owner, burnSink, BASE_BOND, CHALLENGE, REVEAL_W);
+        market = new SAM(scheduler, attester, owner, burnSink, operator, FEE_BPS, BASE_BOND, CHALLENGE, REVEAL_W);
 
         lockTime = uint64(block.timestamp + 1 days);
-        vm.prank(resolver);
+        vm.prank(scheduler);
         market.createGame(GAME, lockTime);
-        vm.prank(resolver);
+        vm.prank(scheduler);
         market.setPrior(GAME, PLAYER, SAM.ReportTag.QUESTIONABLE, SAM.Practice.LIMITED);
 
         vm.deal(buyer, 10 ether);
@@ -84,7 +87,7 @@ contract SAMTest is Test {
         } else {
             ids = new bytes32[](0);
         }
-        vm.prank(resolver);
+        vm.prank(attester);
         market.attest(GAME, keccak256("snapshot"), ids);
     }
 
@@ -109,7 +112,9 @@ contract SAMTest is Test {
         _deliver(c);
         assertEq(uint8(_state(c)), uint8(SAM.ClaimState.KeyDelivered));
         // revealFee is credited at key delivery, not at purchase.
-        assertEq(market.balances(seller), FEE);
+        uint96 protocolFee = uint96((uint256(FEE) * FEE_BPS) / 10_000);
+        assertEq(market.balances(seller), FEE - protocolFee, "seller nets reveal fee minus protocol fee");
+        assertEq(market.balances(operator), protocolFee, "operator accrues the fee");
 
         vm.warp(lockTime);
         _attestInactive(false); // player is ACTIVE -> claim is correct
@@ -121,13 +126,13 @@ contract SAMTest is Test {
         market.settle(c);
 
         assertEq(uint8(_state(c)), uint8(SAM.ClaimState.SettledCorrect));
-        assertEq(market.balances(seller), uint256(FEE) + bond + CONTINGENT);
+        assertEq(market.balances(seller), uint256(FEE) - protocolFee + bond + CONTINGENT);
         assertEq(market.balances(buyer), 0);
 
         uint256 before = seller.balance;
         vm.prank(seller);
         market.withdraw();
-        assertEq(seller.balance, before + FEE + bond + CONTINGENT);
+        assertEq(seller.balance, before + FEE - protocolFee + bond + CONTINGENT);
     }
 
     function test_WrongClaim() public {
@@ -152,7 +157,7 @@ contract SAMTest is Test {
         assertEq(uint8(_state(c)), uint8(SAM.ClaimState.SettledWrong));
         assertEq(market.balances(burnSink), bond, "bond burned");
         assertEq(market.balances(buyer), CONTINGENT, "escrow returned to buyer");
-        assertEq(market.balances(seller), FEE, "seller keeps only the reveal fee");
+        assertEq(market.balances(seller), FEE - uint96((uint256(FEE) * FEE_BPS) / 10_000), "seller keeps only the reveal fee, net of protocol fee");
     }
 
     /// Mandatory reveal: a claim nobody bought still settles and still scores.
@@ -301,7 +306,7 @@ contract SAMTest is Test {
 
     function test_AttestOrdering() public {
         // attest before lock reverts
-        vm.prank(resolver);
+        vm.prank(attester);
         vm.expectRevert(SAM.LockNotReached.selector);
         market.attest(GAME, keccak256("s"), new bytes32[](0));
 
@@ -313,7 +318,7 @@ contract SAMTest is Test {
         _attestInactive(false);
 
         // second attest reverts
-        vm.prank(resolver);
+        vm.prank(attester);
         vm.expectRevert(SAM.AlreadyAttested.selector);
         market.attest(GAME, keccak256("s2"), new bytes32[](0));
 
@@ -325,7 +330,7 @@ contract SAMTest is Test {
         market.settle(c);
 
         // non-resolver cannot attest
-        vm.expectRevert(SAM.NotResolver.selector);
+        vm.expectRevert(SAM.NotAttester.selector);
         market.attest(GAME, keccak256("s3"), new bytes32[](0));
 
         vm.warp(block.timestamp + CHALLENGE);
@@ -465,6 +470,62 @@ contract SAMTest is Test {
         assertEq(uint8(_state(c)), uint8(SAM.ClaimState.Revealed));
     }
 
+    /**
+     * The operator is also the attester, so their revenue must not depend on which way
+     * claims resolve. This pins that: identical fee whether the claim settles correct or
+     * wrong, and the operator never receives any part of a burned bond.
+     */
+    function test_ProtocolFeeIsOutcomeIndependent() public {
+        uint96 expectedFee = uint96((uint256(FEE) * FEE_BPS) / 10_000);
+
+        // --- claim that settles CORRECT ---
+        uint64 b1 = _postBounty();
+        bytes32 s1 = keccak256("ok");
+        uint64 c1 = _fill(b1, _commit(b1, SAM.Outcome.ACTIVE, SAM.Bucket.B55, "e", s1), BASE_BOND);
+        _purchase(c1);
+        _deliver(c1);
+        uint256 feeAfterCorrectDelivery = market.balances(operator);
+
+        // --- claim that settles WRONG ---
+        uint64 b2 = _postBounty();
+        bytes32 s2 = keccak256("bad");
+        uint64 c2 = _fill(b2, _commit(b2, SAM.Outcome.INACTIVE, SAM.Bucket.B55, "e", s2), BASE_BOND);
+        _purchase(c2);
+        _deliver(c2);
+
+        assertEq(feeAfterCorrectDelivery, expectedFee, "fee accrues once per delivered key");
+        assertEq(market.balances(operator), expectedFee * 2, "same fee regardless of eventual outcome");
+
+        vm.warp(lockTime);
+        _attestInactive(false); // c1 correct, c2 wrong
+
+        vm.prank(seller);
+        market.reveal(c1, SAM.Outcome.ACTIVE, SAM.Bucket.B55, "e", s1);
+        vm.prank(seller);
+        market.reveal(c2, SAM.Outcome.INACTIVE, SAM.Bucket.B55, "e", s2);
+        vm.warp(block.timestamp + CHALLENGE);
+
+        uint256 feeBeforeSettlement = market.balances(operator);
+        market.settle(c1);
+        market.settle(c2);
+
+        // Settlement must move nothing to the operator — not from escrow, not from bonds.
+        assertEq(market.balances(operator), feeBeforeSettlement, "settlement pays the operator nothing");
+        assertEq(market.balances(burnSink), BASE_BOND, "burned bond goes to the sink, not the operator");
+    }
+
+    /// A claim whose key is never delivered generates no fee — the operator is paid for a
+    /// completed sale, not for a posted bounty.
+    function test_NoFeeWithoutDelivery() public {
+        uint64 b = _postBounty();
+        uint64 c = _fill(b, _commit(b, SAM.Outcome.ACTIVE, SAM.Bucket.B55, "x", keccak256("s")), BASE_BOND);
+        _purchase(c);
+        vm.warp(lockTime);
+        market.refundUndelivered(c);
+        assertEq(market.balances(operator), 0, "no delivery, no fee");
+        assertEq(market.balances(buyer), uint256(FEE) + CONTINGENT, "buyer fully refunded incl. the fee");
+    }
+
     function test_ContractSolvency() public {
         // Two claims: one settles correct (sold), one settles wrong (sold).
         uint64 b1 = _postBounty();
@@ -491,7 +552,8 @@ contract SAMTest is Test {
         market.settle(c1);
         market.settle(c2);
 
-        uint256 owed = market.balances(seller) + market.balances(buyer) + market.balances(burnSink);
+        uint256 owed = market.balances(seller) + market.balances(buyer) + market.balances(burnSink)
+            + market.balances(operator);
         assertEq(address(market).balance, owed, "credited balances exactly match held ETH");
     }
 }

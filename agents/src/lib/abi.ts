@@ -8,7 +8,12 @@ export const SAM_ABI = [
     "type": "constructor",
     "inputs": [
       {
-        "name": "_resolver",
+        "name": "_scheduler",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_attester",
         "type": "address",
         "internalType": "address"
       },
@@ -21,6 +26,16 @@ export const SAM_ABI = [
         "name": "_burnSink",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "_feeRecipient",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_protocolFeeBps",
+        "type": "uint16",
+        "internalType": "uint16"
       },
       {
         "name": "_baseBond",
@@ -62,6 +77,19 @@ export const SAM_ABI = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "attester",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -310,6 +338,19 @@ export const SAM_ABI = [
   },
   {
     "type": "function",
+    "name": "feeRecipient",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "fillBounty",
     "inputs": [
       {
@@ -523,6 +564,19 @@ export const SAM_ABI = [
   },
   {
     "type": "function",
+    "name": "protocolFeeBps",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "purchase",
     "inputs": [
       {
@@ -559,19 +613,6 @@ export const SAM_ABI = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "resolver",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -615,6 +656,19 @@ export const SAM_ABI = [
         "name": "",
         "type": "uint64",
         "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "scheduler",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -1114,6 +1168,31 @@ export const SAM_ABI = [
   },
   {
     "type": "event",
+    "name": "ProtocolFeeAccrued",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "recipient",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint96",
+        "indexed": false,
+        "internalType": "uint96"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "Withdrawn",
     "inputs": [
       {
@@ -1218,6 +1297,11 @@ export const SAM_ABI = [
   },
   {
     "type": "error",
+    "name": "NotAttester",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NotBuyer",
     "inputs": []
   },
@@ -1233,7 +1317,7 @@ export const SAM_ABI = [
   },
   {
     "type": "error",
-    "name": "NotResolver",
+    "name": "NotScheduler",
     "inputs": []
   },
   {
