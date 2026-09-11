@@ -7,3 +7,4 @@ foundry-pp/
 node_modules/
 out/
 web/dist/
+.vercel
