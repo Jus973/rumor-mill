@@ -66,7 +66,8 @@ contract SealedAvailabilityMarket {
         SettledCorrect,
         SettledWrong,
         Slashed,
-        RefundedUndelivered
+        RefundedUndelivered,
+        Unwound
     }
 
     // -----------------------------------------------------------------------
@@ -78,6 +79,7 @@ contract SealedAvailabilityMarket {
         uint64 attestedAt;
         bytes32 reportHash;
         bool voided;
+        bool unwound; // permissionless escape hatch was triggered
     }
 
     struct Prior {
@@ -141,6 +143,18 @@ contract SealedAvailabilityMarket {
     uint96 public immutable baseBond;
     uint64 public immutable challengeWindow;
     uint64 public immutable revealWindow;
+    /**
+     * How long after lock the market waits for an attestation before ANYONE may unwind the
+     * game and hand every participant their money back.
+     *
+     * The operator is centralized on the happy path: it is the only party that can attest,
+     * and everyone depends on it for speed. But `settle` and `slashUnrevealed` both gate on
+     * `isFinal`, which needs an attestation — so without this, an operator that simply went
+     * away would freeze every bond and every escrow on the game permanently.
+     *
+     * This is the escape hatch. You trust the operator for CONVENIENCE, never for CUSTODY.
+     */
+    uint64 public immutable unwindDelay;
 
     uint256 private _reentrancyLock = 1;
 
@@ -174,6 +188,8 @@ contract SealedAvailabilityMarket {
     event ProtocolFeeAccrued(uint64 indexed claimId, address indexed recipient, uint96 amount);
     event Attested(bytes32 indexed gameId, bytes32 reportHash, bytes32[] inactivePlayerIds);
     event AttestationVoided(bytes32 indexed gameId);
+    event GameUnwound(bytes32 indexed gameId, address indexed triggeredBy);
+    event ClaimUnwound(uint64 indexed claimId, address indexed seller, uint96 bond, uint96 escrow);
     event ClaimRevealed(uint64 indexed claimId, Outcome claimed, Bucket bucket, bytes evidence);
     event ClaimSettled(
         uint64 indexed claimId,
@@ -214,6 +230,9 @@ contract SealedAvailabilityMarket {
     error NoPubKey();
     error AlreadyAttested();
     error NotAttested();
+    error AlreadyUnwound();
+    error UnwindTooEarly();
+    error NotUnwound();
     error NotFinal();
     error ChallengeWindowClosed();
     error RevealWindowOpen();
@@ -267,7 +286,8 @@ contract SealedAvailabilityMarket {
         uint16 _protocolFeeBps,
         uint96 _baseBond,
         uint64 _challengeWindow,
-        uint64 _revealWindow
+        uint64 _revealWindow,
+        uint64 _unwindDelay
     ) {
         scheduler = _scheduler;
         attester = _attester;
@@ -279,6 +299,7 @@ contract SealedAvailabilityMarket {
         baseBond = _baseBond;
         challengeWindow = _challengeWindow;
         revealWindow = _revealWindow;
+        unwindDelay = _unwindDelay;
     }
 
     // -----------------------------------------------------------------------
@@ -509,6 +530,7 @@ contract SealedAvailabilityMarket {
         if (g.lockTime == 0) revert NoGame();
         if (block.timestamp < g.lockTime) revert LockNotReached();
         if (g.attestedAt != 0) revert AlreadyAttested();
+        if (g.unwound) revert AlreadyUnwound();
 
         g.attestedAt = uint64(block.timestamp);
         g.reportHash = reportHash;
@@ -526,6 +548,55 @@ contract SealedAvailabilityMarket {
         if (block.timestamp >= uint256(g.attestedAt) + challengeWindow) revert ChallengeWindowClosed();
         g.voided = true;
         emit AttestationVoided(gameId);
+    }
+
+    // -----------------------------------------------------------------------
+    // Escape hatch — the operator is trusted for liveness, never for custody
+    // -----------------------------------------------------------------------
+
+    /**
+     * @notice Permissionlessly abandon a game the operator never attested.
+     *
+     * Callable by anyone once `lockTime + unwindDelay` has passed with no attestation. It
+     * does not decide any outcome — nobody knows the outcome, which is the whole problem —
+     * it simply opens the door for every participant to take their own money back.
+     */
+    function forceUnwind(bytes32 gameId) external {
+        Game storage g = games[gameId];
+        if (g.lockTime == 0) revert NoGame();
+        if (g.unwound) revert AlreadyUnwound();
+        if (g.attestedAt != 0) revert AlreadyAttested();
+        if (block.timestamp <= uint256(g.lockTime) + unwindDelay) revert UnwindTooEarly();
+
+        g.unwound = true;
+        emit GameUnwound(gameId, msg.sender);
+    }
+
+    /**
+     * @notice Return one claim's bond to its seller and its escrow to its buyer.
+     * @dev No ClaimSettled is emitted and no bond is burned: the outcome is unknown, so
+     *      nobody is scored and nobody is punished. An unwound game is a non-event.
+     */
+    function unwindClaim(uint64 claimId) external {
+        Claim storage c = claims[claimId];
+        if (c.seller == address(0)) revert NoClaim();
+
+        Bounty storage b = bounties[c.bountyId];
+        if (!games[b.gameId].unwound) revert NotUnwound();
+        if (
+            c.state == ClaimState.SettledCorrect || c.state == ClaimState.SettledWrong
+                || c.state == ClaimState.Slashed || c.state == ClaimState.RefundedUndelivered
+                || c.state == ClaimState.Unwound
+        ) revert BadState();
+
+        uint96 escrow = c.escrow;
+        c.escrow = 0;
+        c.state = ClaimState.Unwound;
+
+        balances[c.seller] += c.bond;
+        if (escrow != 0) balances[b.buyer] += escrow;
+
+        emit ClaimUnwound(claimId, c.seller, c.bond, escrow);
     }
 
     // -----------------------------------------------------------------------
@@ -616,7 +687,7 @@ contract SealedAvailabilityMarket {
 
     function isFinal(bytes32 gameId) public view returns (bool) {
         Game storage g = games[gameId];
-        return g.attestedAt != 0 && !g.voided
+        return g.attestedAt != 0 && !g.voided && !g.unwound
             && block.timestamp >= uint256(g.attestedAt) + challengeWindow;
     }
 
