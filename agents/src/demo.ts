@@ -46,6 +46,7 @@ async function main() {
   const challengeWindow = Number(await read<bigint>(pub, 'challengeWindow'));
   const revealWindow = Number(await read<bigint>(pub, 'revealWindow'));
   const baseBond = await read<bigint>(pub, 'baseBond');
+  const feeBps = await read<number>(pub, 'protocolFeeBps');
 
   const fixtureFile = loadFixture('fixtures/week1.json');
   // Demo default: 110s lock. Long enough for ~25 pre-lock txs at Sepolia's ~13s
@@ -100,14 +101,34 @@ async function main() {
   const lockAt = t0 + lockOffset;
   const totalEstimate = lockOffset + challengeWindow + revealWindow + 40;
 
+  const parties: Array<{ label: string; addr: `0x${string}`; role: string }> = [
+    { label: 'OPERATOR', addr: resolver.address as `0x${string}`, role: 'scheduler + attester + fees' },
+    { label: 'BUYER', addr: buyer.address as `0x${string}`, role: 'lineup optimizer' },
+    { label: 'AGGREGATOR', addr: aggregator.address as `0x${string}`, role: 'sells lead time' },
+    { label: 'FORECASTER', addr: forecaster.address as `0x${string}`, role: 'sells calibration' },
+  ];
+  const opening = new Map<string, bigint>();
+  for (const p of parties) opening.set(p.label, await pub.getBalance({ address: p.addr }));
+
   head('SEALED AVAILABILITY MARKET — live demo on Ethereum Sepolia');
   console.log(`  contract        ${CONTRACT_ADDRESS}`);
   console.log(`  explorer        ${EXPLORER}`);
-  console.log(`  resolver/owner  ${resolver.address}  (also the deployer — the trust assumption)`);
-  console.log(`  buyer           ${buyer.address}`);
-  console.log(`  aggregator      ${aggregator.address}`);
-  console.log(`  forecaster      ${forecaster.address}`);
-  console.log(`  params          baseBond=${fmt(baseBond)}  lock=+${lockOffset}s  challenge=${challengeWindow}s  reveal=${revealWindow}s`);
+  console.log('');
+  console.log('  STAKEHOLDERS');
+  console.log(`    OPERATOR    ${resolver.address}`);
+  console.log(`                scheduler (slate + public priors) · attester (outcome) · fee recipient`);
+  console.log(`                earns ${Number(feeBps) / 100}% of every reveal fee — charged on the SALE, never on the outcome`);
+  console.log(`    BUYER       ${buyer.address}`);
+  console.log(`                lineup optimizer · posts bounties, buys sealed claims, must lock`);
+  console.log(`    AGGREGATOR  ${aggregator.address}`);
+  console.log(`                tipster agent · sells LEAD TIME from local beat reporting`);
+  console.log(`    FORECASTER  ${forecaster.address}`);
+  console.log(`                tipster agent · sells CALIBRATION, only when it disagrees with the report`);
+  console.log(`    BURN SINK   0x00000000000000000000000000000000000dEaD`);
+  console.log(`                forfeited bonds — deliberately NOT the operator, so the attester`);
+  console.log(`                can never profit from sellers being wrong`);
+  console.log('');
+  console.log(`  params          baseBond=${fmt(baseBond)}  lock=+${lockOffset}s  challenge=${challengeWindow}s  reveal=${revealWindow}s  fee=${Number(feeBps) / 100}%`);
   console.log(`  est. runtime    ~${Math.ceil(totalEstimate / 60)}m${totalEstimate % 60}s`);
 
   // ── t+0:00 ────────────────────────────────────────────────────────────────
@@ -213,10 +234,16 @@ async function main() {
 
   // ── withdraw + ledger ─────────────────────────────────────────────────────
   sub('13. PULL PAYMENTS — everyone withdraws');
-  await Promise.all([aggregator.withdraw(), forecaster.withdraw(), buyer.withdraw()]);
+  await Promise.all([
+    aggregator.withdraw(),
+    forecaster.withdraw(),
+    buyer.withdraw(),
+    operatorWithdraw(resolver.address),
+  ]);
 
   state = await indexMarket(pub);
   printLedger(state, { aggregator, forecaster }, fixture, isRunClaim);
+  await printStakeholders(parties, opening);
 }
 
 /** Latest block timestamp — the ONLY clock the contract's require()s care about. */
@@ -242,6 +269,47 @@ async function waitUntilChain(ts: number, why: string) {
     }
     await sleep(3000);
   }
+}
+
+/**
+ * Per-stakeholder P&L across the run, measured from real wallet balances. Includes gas, so
+ * these are what each party actually ended up with — not an idealized accounting.
+ */
+async function printStakeholders(
+  parties: Array<{ label: string; addr: `0x${string}`; role: string }>,
+  opening: Map<string, bigint>,
+) {
+  head('STAKEHOLDERS — net position across this run (includes gas)');
+  console.log('');
+  console.log(`  ${'party'.padEnd(13)}${'role'.padEnd(30)}${'opening'.padEnd(14)}${'closing'.padEnd(14)}net`);
+  console.log('  ' + '─'.repeat(94));
+  for (const p of parties) {
+    const closing = await pub.getBalance({ address: p.addr });
+    const open = opening.get(p.label) ?? 0n;
+    const delta = closing - open;
+    const sign = delta >= 0n ? '+' : '-';
+    const mag = delta >= 0n ? delta : -delta;
+    console.log(
+      `  ${p.label.padEnd(13)}${p.role.padEnd(30)}${fmt(open).padEnd(14)}${fmt(closing).padEnd(14)}${sign}${fmt(mag)}`,
+    );
+  }
+  console.log('');
+  console.log('  The OPERATOR is paid on the SALE (a % of each reveal fee), never on the outcome.');
+  console.log('  Forfeited bonds go to the burn sink, so the attester cannot profit from a wrong claim.');
+  console.log('');
+}
+
+/** The operator sweeps its accrued protocol fees, like any other participant. */
+async function operatorWithdraw(who: `0x${string}`) {
+  const { send } = await import('./lib/tx.js');
+  const { schedulerWallet } = await import('./lib/chain.js');
+  const bal = await read<bigint>(pub, 'balances', [who]);
+  if (bal === 0n) {
+    info('OPERATOR has no accrued fees to withdraw');
+    return;
+  }
+  const { hash } = await send(pub, schedulerWallet(), { functionName: 'withdraw', args: [] });
+  act('OPERATOR', `withdraw ${fmt(bal)} in protocol fees`, hash);
 }
 
 async function fillPass(

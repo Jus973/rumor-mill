@@ -21,6 +21,8 @@ export interface FixtureNews {
 export interface FixturePlayer {
   team: string;
   slug: string;
+  /** NFL GSIS id — the canonical identity that playerId hashes. */
+  gsisId: string;
   name: string;
   prior: { tag: keyof typeof ReportTag; practice: keyof typeof Practice };
   practiceTrajectory: Array<keyof typeof Practice>;
@@ -89,7 +91,7 @@ export function resolveFixture(f: FixtureFile, t0: number): ResolvedFixture {
       lockTime: t0 + g.lockOffsetSec,
       players: g.players.map((p) => ({
         ...p,
-        playerId: playerIdOf(p.team, p.slug),
+        playerId: playerIdOf(p.gsisId),
         priorTag: ReportTag[p.prior.tag],
         priorPractice: Practice[p.prior.practice],
         actualOutcome: p.actual === 'ACTIVE' ? Outcome.ACTIVE : Outcome.INACTIVE,

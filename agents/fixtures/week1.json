@@ -1,7 +1,7 @@
 {
   "season": 2026,
   "week": 1,
-  "note": "Synthetic Week 1 (LLD A4). Lock times are relative to demo start. The `actual` field is what the resolver attests after lock; sellers never see it.",
+  "note": "Synthetic Week 1 (LLD A4). Lock times are relative to demo start. The `actual` field is what the resolver attests after lock; sellers never see it. gsisId values are the NFL's own player identifiers and are what playerId hashes \u2014 they are ILLUSTRATIVE here and must come from the league feed in production.",
   "games": [
     {
       "home": "SF",
@@ -11,10 +11,21 @@
         {
           "team": "SF",
           "slug": "cmc",
+          "gsisId": "00-0033280",
           "name": "Christian McCaffrey",
-          "prior": { "tag": "QUESTIONABLE", "practice": "LIMITED" },
-          "practiceTrajectory": ["LIMITED", "DNP", "DNP"],
-          "injury": { "class": "soft-tissue", "daysSince": 3 },
+          "prior": {
+            "tag": "QUESTIONABLE",
+            "practice": "LIMITED"
+          },
+          "practiceTrajectory": [
+            "LIMITED",
+            "DNP",
+            "DNP"
+          ],
+          "injury": {
+            "class": "soft-tissue",
+            "daysSince": 3
+          },
           "news": [
             {
               "tsOffsetSec": -5400,
@@ -28,10 +39,21 @@
         {
           "team": "SEA",
           "slug": "dk",
+          "gsisId": "00-0035640",
           "name": "DK Metcalf",
-          "prior": { "tag": "QUESTIONABLE", "practice": "LIMITED" },
-          "practiceTrajectory": ["FULL", "LIMITED", "DNP"],
-          "injury": { "class": "soft-tissue", "daysSince": 2 },
+          "prior": {
+            "tag": "QUESTIONABLE",
+            "practice": "LIMITED"
+          },
+          "practiceTrajectory": [
+            "FULL",
+            "LIMITED",
+            "DNP"
+          ],
+          "injury": {
+            "class": "soft-tissue",
+            "daysSince": 2
+          },
           "news": [
             {
               "tsOffsetSec": -4200,
@@ -52,10 +74,21 @@
         {
           "team": "KC",
           "slug": "kelce",
+          "gsisId": "00-0030506",
           "name": "Travis Kelce",
-          "prior": { "tag": "QUESTIONABLE", "practice": "DNP" },
-          "practiceTrajectory": ["DNP", "LIMITED", "FULL"],
-          "injury": { "class": "bone-bruise", "daysSince": 12 },
+          "prior": {
+            "tag": "QUESTIONABLE",
+            "practice": "DNP"
+          },
+          "practiceTrajectory": [
+            "DNP",
+            "LIMITED",
+            "FULL"
+          ],
+          "injury": {
+            "class": "bone-bruise",
+            "daysSince": 12
+          },
           "news": [
             {
               "tsOffsetSec": 150,
