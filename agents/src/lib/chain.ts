@@ -17,6 +17,7 @@ import {
 import { sepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
 import { readFileSync, existsSync } from 'node:fs';
+import './env.js'; // side effect: populates process.env from .env if not already set
 import { SAM_ABI } from './abi.js';
 
 export { SAM_ABI };
@@ -43,7 +44,11 @@ export const EXPLORER = `https://sepolia.etherscan.io/address/${CONTRACT_ADDRESS
 
 export function rpcUrl(): string {
   const url = process.env.SEPOLIA_RPC_URL;
-  if (!url) throw new Error('SEPOLIA_RPC_URL is not set (source .env)');
+  if (!url) {
+    throw new Error(
+      'SEPOLIA_RPC_URL is not set. Copy .env.example to .env in the repo root and fill it in.',
+    );
+  }
   return url;
 }
 
@@ -81,7 +86,11 @@ export function agentKeys(): AgentKeyFile {
 /** The resolver/owner is the deployer, whose key is in .env (LLD A3). */
 export function resolverAccount() {
   const raw = process.env.PRIVATE_KEY;
-  if (!raw) throw new Error('PRIVATE_KEY is not set (source .env)');
+  if (!raw) {
+    throw new Error(
+      'PRIVATE_KEY is not set. Copy .env.example to .env in the repo root and fill it in.',
+    );
+  }
   const pk = (raw.startsWith('0x') ? raw : `0x${raw}`) as Hex;
   return privateKeyToAccount(pk);
 }

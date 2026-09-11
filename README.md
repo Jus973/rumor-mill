@@ -205,10 +205,14 @@ For the live demo you need a funded Sepolia key:
 ```bash
 cp .env.example .env        # add PRIVATE_KEY and SEPOLIA_RPC_URL
 cd agents
+npm install
 npm run keys                # generates .agent-keys.json (gitignored, mode 0600)
 # fund the three printed addresses with ~0.05 Sepolia ETH each
 npm run demo
 ```
+
+`.env` is read automatically from the repo root — no `source` needed. An already-exported
+shell variable always takes precedence over the file.
 
 `npm run demo` is self-contained and re-runnable: it advances to a fresh synthetic week if the
 current one is already used on-chain, and scopes settlement and the ledger to its own run.
