@@ -112,6 +112,49 @@ Every window is a constructor argument.
 | Data source | `fixtures/week1.json` | official injury report adapter (not built) |
 
 
+## Running it
+
+```bash
+forge test                                  # 16 contract tests
+cd agents && npm install && npm test        # 37 crypto + scoring tests
+```
+
+For the live demo, copy `.env.example` to `.env` in the repo root and fill it in (it is read
+automatically — no `source` needed; an exported shell variable still wins). Then:
+
+```bash
+cd agents
+npm run keys     # generates .agent-keys.json (gitignored, mode 0600)
+                 # fund the three printed addresses with ~0.05 Sepolia ETH each
+npm run demo     # one orchestrated process, ~4m40s
+```
+
+### Per-stakeholder demo (four terminals)
+
+`npm run demo` runs everything in one process, which hides the fact that these are four
+independent operators. To show each stakeholder acting on its own — **manager first**, since
+it publishes the slate:
+
+```bash
+npm run manager      # terminal 1 — market operator
+npm run scraper      # terminal 2 — aggregator, polls sources, sells lead time
+npm run forecaster   # terminal 3 — model seller, sells calibration
+npm run buyer        # terminal 4 — lineup optimizer
+```
+
+They share no state and no message bus. Each replays from `getLogs(deployBlock)` every few
+seconds and acts on what it finds.
+
+The subtle part is the clock. The fixture expresses news as offsets from the start of the
+week, so four processes started at four different moments would disagree about what has
+already broken. Each agent therefore derives `t0` from the **chain** — the game's on-chain
+`lockTime` minus the lock offset — so they agree no matter when they were launched. Joining
+agents also refuse to attach to an already-attested slate, so a late start waits for the next
+week instead of replaying a settled one.
+
+Both demos are re-runnable: the manager advances to a fresh synthetic week each time, since
+`gameId` is deterministic from `(season, week, teams)`.
+
 ## Known gaps
 
 - **No live data adapter.** The oracle is a fixture file and one key (see Trust model).
