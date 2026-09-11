@@ -1,0 +1,8 @@
+.env
+agents/.agent-keys.json
+agents/out/
+broadcast/
+cache/
+foundry-pp/
+node_modules/
+out/

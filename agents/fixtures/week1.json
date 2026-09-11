@@ -1,0 +1,73 @@
+{
+  "season": 2026,
+  "week": 1,
+  "note": "Synthetic Week 1 (LLD A4). Lock times are relative to demo start. The `actual` field is what the resolver attests after lock; sellers never see it.",
+  "games": [
+    {
+      "home": "SF",
+      "away": "SEA",
+      "lockOffsetSec": 240,
+      "players": [
+        {
+          "team": "SF",
+          "slug": "cmc",
+          "name": "Christian McCaffrey",
+          "prior": { "tag": "QUESTIONABLE", "practice": "LIMITED" },
+          "practiceTrajectory": ["LIMITED", "DNP", "DNP"],
+          "injury": { "class": "soft-tissue", "daysSince": 3 },
+          "news": [
+            {
+              "tsOffsetSec": -5400,
+              "source": "local-beat",
+              "text": "Team source says McCaffrey will not travel with the club to Seattle"
+            }
+          ],
+          "actual": "INACTIVE",
+          "narrative": "Contrarian call that is RIGHT: the public report still says QUESTIONABLE (p_active 0.70) but he is inactive."
+        },
+        {
+          "team": "SEA",
+          "slug": "dk",
+          "name": "DK Metcalf",
+          "prior": { "tag": "QUESTIONABLE", "practice": "LIMITED" },
+          "practiceTrajectory": ["FULL", "LIMITED", "DNP"],
+          "injury": { "class": "soft-tissue", "daysSince": 2 },
+          "news": [
+            {
+              "tsOffsetSec": -4200,
+              "source": "national",
+              "text": "Metcalf was a full participant in the walkthrough and is expected to play"
+            }
+          ],
+          "actual": "ACTIVE",
+          "narrative": "Contrarian call that is WRONG: the forecaster reads the declining practice trajectory as INACTIVE, but he plays. Bond burns."
+        }
+      ]
+    },
+    {
+      "home": "KC",
+      "away": "BUF",
+      "lockOffsetSec": 240,
+      "players": [
+        {
+          "team": "KC",
+          "slug": "kelce",
+          "name": "Travis Kelce",
+          "prior": { "tag": "QUESTIONABLE", "practice": "DNP" },
+          "practiceTrajectory": ["DNP", "LIMITED", "FULL"],
+          "injury": { "class": "bone-bruise", "daysSince": 12 },
+          "news": [
+            {
+              "tsOffsetSec": 150,
+              "source": "local-beat",
+              "text": "Kelce took every rep with the first team; expected to play",
+              "comment": "Arrives AFTER the buyer's purchase pass, so the aggregator's fill on this slot goes unsold."
+            }
+          ],
+          "actual": "ACTIVE",
+          "narrative": "Two roles: the forecaster's claim here is deliberately never revealed (slashed), and the aggregator's late fill is the unsold claim used for the lock-cliff revert."
+        }
+      ]
+    }
+  ]
+}
