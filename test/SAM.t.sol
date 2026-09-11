@@ -20,6 +20,7 @@ contract SAMTest is Test {
     uint96 constant BASE_BOND = 0.0005 ether;
     uint64 constant CHALLENGE = 60;
     uint64 constant REVEAL_W = 240;
+    uint64 constant UNWIND = 3 days;
 
     bytes32 constant GAME = keccak256("NFL2026W1SFSEA");
     bytes32 constant PLAYER = keccak256("NFLSFcmc");
@@ -34,7 +35,9 @@ contract SAMTest is Test {
 
     function setUp() public {
         vm.warp(1_000_000);
-        market = new SAM(scheduler, attester, owner, burnSink, operator, FEE_BPS, BASE_BOND, CHALLENGE, REVEAL_W);
+        market = new SAM(
+            scheduler, attester, owner, burnSink, operator, FEE_BPS, BASE_BOND, CHALLENGE, REVEAL_W, UNWIND
+        );
 
         lockTime = uint64(block.timestamp + 1 days);
         vm.prank(scheduler);
@@ -524,6 +527,75 @@ contract SAMTest is Test {
         market.refundUndelivered(c);
         assertEq(market.balances(operator), 0, "no delivery, no fee");
         assertEq(market.balances(buyer), uint256(FEE) + CONTINGENT, "buyer fully refunded incl. the fee");
+    }
+
+    /**
+     * The operator is centralized on the happy path, so it must not be able to hold funds
+     * hostage by simply going quiet. Without an attestation, settle and slashUnrevealed are
+     * both unreachable — every bond and escrow would be frozen forever.
+     */
+    function test_OperatorVanishes_FundsAreStillRecoverable() public {
+        uint64 b = _postBounty();
+        bytes32 salt = keccak256("gone");
+        bytes32 ch = _commit(b, SAM.Outcome.ACTIVE, SAM.Bucket.B55, "e", salt);
+        uint64 c = _fill(b, ch, BASE_BOND);
+        _purchase(c);
+        _deliver(c);
+
+        vm.warp(lockTime);
+        // The operator never attests. Nothing can settle.
+        vm.expectRevert(SAM.BadState.selector);
+        market.settle(c);
+
+        // Too early for the hatch.
+        vm.expectRevert(SAM.UnwindTooEarly.selector);
+        market.forceUnwind(GAME);
+
+        vm.warp(lockTime + UNWIND + 1);
+
+        // Permissionless: a total stranger can open the hatch.
+        address stranger = makeAddr("passerby");
+        vm.prank(stranger);
+        market.forceUnwind(GAME);
+
+        vm.prank(stranger);
+        market.unwindClaim(c);
+
+        assertEq(uint8(_state(c)), uint8(SAM.ClaimState.Unwound));
+        assertEq(market.balances(seller), uint256(FEE) - uint96((uint256(FEE) * FEE_BPS) / 10_000) + BASE_BOND, "bond returned to seller");
+        assertEq(market.balances(buyer), CONTINGENT, "escrow returned to buyer");
+        assertEq(market.balances(burnSink), 0, "nothing is burned: the outcome is unknown");
+
+        uint256 owed = market.balances(seller) + market.balances(buyer)
+            + market.balances(burnSink) + market.balances(operator);
+        assertEq(address(market).balance, owed, "every wei is accounted for after an unwind");
+    }
+
+    /// The hatch closes the moment the operator does its job.
+    function test_CannotUnwindAnAttestedGame() public {
+        uint64 b = _postBounty();
+        _fill(b, _commit(b, SAM.Outcome.ACTIVE, SAM.Bucket.B55, "e", keccak256("s")), BASE_BOND);
+        vm.warp(lockTime);
+        _attestInactive(false);
+
+        vm.warp(lockTime + UNWIND + 1);
+        vm.expectRevert(SAM.AlreadyAttested.selector);
+        market.forceUnwind(GAME);
+    }
+
+    /// ...and once the hatch is open, a late attestation cannot race it.
+    function test_AttestCannotRaceAnUnwind() public {
+        uint64 b = _postBounty();
+        _fill(b, _commit(b, SAM.Outcome.ACTIVE, SAM.Bucket.B55, "e", keccak256("s")), BASE_BOND);
+        vm.warp(lockTime + UNWIND + 1);
+        market.forceUnwind(GAME);
+
+        bytes32[] memory ids = new bytes32[](0);
+        vm.prank(attester);
+        vm.expectRevert(SAM.AlreadyUnwound.selector);
+        market.attest(GAME, keccak256("late"), ids);
+
+        assertFalse(market.isFinal(GAME), "an unwound game is never final");
     }
 
     function test_ContractSolvency() public {

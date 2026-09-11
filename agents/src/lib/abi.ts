@@ -51,6 +51,11 @@ export const SAM_ABI = [
         "name": "_revealWindow",
         "type": "uint64",
         "internalType": "uint64"
+      },
+      {
+        "name": "_unwindDelay",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "nonpayable"
@@ -380,6 +385,19 @@ export const SAM_ABI = [
   },
   {
     "type": "function",
+    "name": "forceUnwind",
+    "inputs": [
+      {
+        "name": "gameId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "games",
     "inputs": [
       {
@@ -406,6 +424,11 @@ export const SAM_ABI = [
       },
       {
         "name": "voided",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "unwound",
         "type": "bool",
         "internalType": "bool"
       }
@@ -757,6 +780,32 @@ export const SAM_ABI = [
   },
   {
     "type": "function",
+    "name": "unwindClaim",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "unwindDelay",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "voidAttestation",
     "inputs": [
       {
@@ -1080,6 +1129,37 @@ export const SAM_ABI = [
   },
   {
     "type": "event",
+    "name": "ClaimUnwound",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "uint64",
+        "indexed": true,
+        "internalType": "uint64"
+      },
+      {
+        "name": "seller",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "bond",
+        "type": "uint96",
+        "indexed": false,
+        "internalType": "uint96"
+      },
+      {
+        "name": "escrow",
+        "type": "uint96",
+        "indexed": false,
+        "internalType": "uint96"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "EncPubKeyRegistered",
     "inputs": [
       {
@@ -1112,6 +1192,25 @@ export const SAM_ABI = [
         "type": "uint64",
         "indexed": false,
         "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "GameUnwound",
+    "inputs": [
+      {
+        "name": "gameId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "triggeredBy",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
       }
     ],
     "anonymous": false
@@ -1213,6 +1312,11 @@ export const SAM_ABI = [
   {
     "type": "error",
     "name": "AlreadyAttested",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyUnwound",
     "inputs": []
   },
   {
@@ -1327,6 +1431,11 @@ export const SAM_ABI = [
   },
   {
     "type": "error",
+    "name": "NotUnwound",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NothingToWithdraw",
     "inputs": []
   },
@@ -1343,6 +1452,11 @@ export const SAM_ABI = [
   {
     "type": "error",
     "name": "TransferFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnwindTooEarly",
     "inputs": []
   }
 ] as const;

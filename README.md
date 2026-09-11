@@ -1,230 +1,167 @@
-# NFL Fantasy Agent Rumor Mill 
+# NFL Fantasy Agent Rumor Mill
 
-**A market where tip agents sell sealed, bonded claims about whether an NFL player will
-be on the official inactive list.**
+**A market where tip agents sell sealed, bonded claims about whether an NFL player will be on the official inactive list.**
 
-Everything on a game settles in one batch against a single resolver attestation. Reputation
-is earned for being right *early* and *against the public report*, and it is impossible to
-cherry-pick: every claim a seller commits is revealed after lock or forfeits its bond.
+Sellers have information on who will be standing/sitting before the NFL official reports:
+- Aggregator agents (those who scrape the internet to report from niche sources faster than mainstream sources)
+- Forecaster agents (those trying to make money off this system by selling predictions)
+- Humans with insider knowledge 
+
+Buyers are those who will use this information for personal benefit
+- Fantasy football agents (lineup optimizers)
+- Prediction market agents (trying to bet before the curve)
+
+### Features: 
+- Sellers are paid on outcome, and post a bond that burns if they're wrong. 
+- Reputation is earned for being right early and against the public report.
+- Contracts are locked at lineup lock (90 minutes before an actual game)
+- Price is compared to oracle-driven truth values; there is a surprise factor that incentivizes sellers to give nicher information
+- The earlier you send your information as compared to lineup lock, the price is set to be higher 
+- Bounty-based shopping (buyers don't browse information in a catalog, they ask the system for information instead)
+
 
 | | |
 |---|---|
-| **Contract** | [`0x7D228e488Ff5A9069e019A7AB68558d26fA0A138`](https://sepolia.etherscan.io/address/0x7D228e488Ff5A9069e019A7AB68558d26fA0A138) |
-| **Chain** | Ethereum Sepolia (`11155111`) |
-| **Deploy block** | `11680305` |
-| **Demo** | `cd agents && npm run demo` — full lifecycle on live Sepolia in ~4m40s |
-| **Tests** | 14 Foundry (`forge test`) · 37 Vitest (`cd agents && npm test`) |
+| **Contract** | [`0x303B63C53cB0ce16b6DbD0a74040E66090156793`](https://sepolia.etherscan.io/address/0x303B63C53cB0ce16b6DbD0a74040E66090156793) |
+| **Chain** | Ethereum Sepolia (`11155111`), deploy block `11680855` |
 
----
+### Stakeholders
 
-## The vertical
-
-NFL player availability, sold as a single typed claim: `(game, player, ACTIVE|INACTIVE, confidence)`.
-
-Nothing else is sold. Two kinds of seller have an edge worth paying for:
-
-- **Aggregators** surface local beat reporting, practice observations, and travel news before
-  national outlets republish it. They sell **lead time**.
-- **Forecasters** model injury class, practice trajectory, and recovery base rates to resolve
-  "questionable" into a calibrated probability. They sell **calibration** — information that
-  exists on no feed at all.
-
-Buyers are DFS and betting optimizers with specific players in specific slots and a hard lock
-time. They post bounties on the slots they're uncertain about, buy several sealed forecasts,
-and ensemble them weighted by each seller's on-chain ledger.
-
-The counterparty is the league itself, which actively withholds availability information.
-That obfuscation is precisely why lead time and calibration are scarce enough to price.
-
-## Trust assumptions
-
-**1. The resolver is honest. This is the real one.**
-
-A single key decides what the official inactive list said. It calls
-`attest(gameId, reportHash, inactivePlayerIds)`, and that one call settles every claim on the
-game. In this deployment the resolver is also the owner and the deployer — one key, three hats.
-
-It is bounded, but only weakly: `settle` cannot run until `attestedAt + challengeWindow`, and
-the owner can `voidAttestation` inside that window. With `resolver == owner`, that is a
-timelock with no independent challenger behind it.
-
-The resolver also writes the **priors** (`setPrior`/`setPriorBatch`). Since scoring is
-`Δ = w · (ln qy − ln py)`, where `py` comes from the prior snapshot and `qy` from the outcome,
-the resolver controls *both* inputs to every seller's score. It can move reputation by
-rewriting what was "publicly known" at commit time, not only by lying about who sat out.
-
-**2. Buyers keep their own keys.** Sellers deliver `ECIES(buyerPubKey, K)`. A buyer who loses
-that key cannot read anything it paid for; the contract cannot help.
-
-**3. The official inactive list is ground truth.** The protocol settles against what the
-resolver attests the league published, not against who actually took the field.
-
-What is *not* assumed: no seller honesty (bonds and mandatory reveal), no buyer honesty (pull
-payments, escrow), no platform (state lives only in the contract), and no trust in the
-ciphertext (every payload is checked against its pre-lock commitment).
-
-## The biggest design decision
-
-**Sealing is two-step, and the key is what's sold.**
-
-At `fillBounty` the seller emits AES-256-GCM ciphertext under a fresh key `K`, plus
-`commitHash`. The ciphertext is public immediately. `K` is withheld. Only after the buyer
-pays does the seller send `deliverKey` carrying `ECIES(buyerPubKey, K)`.
-
-Encrypting directly to the buyer at fill time — the obvious design — would let them read the
-claim without paying. Publishing the plaintext would destroy the product. Withholding the
-*ciphertext* would let the seller swap the content after seeing who bought. Only the split
-gets all three: the content is fixed and publicly committed before lock, and it stays
-unreadable until money moves.
-
-That commitment is what makes the rest enforceable:
-
-- **Lock cliff.** `fillBounty` and `purchase` revert at `lockTime`. Stale intel is unsellable
-  by construction, not by policy.
-- **Mandatory reveal.** After lock, *every* claim is revealed — sold or not — or
-  `slashUnrevealed` burns the bond. A seller cannot quietly drop the calls that went badly, so
-  the ledger is a complete record rather than a highlight reel. In the demo this scores
-  `ln(0.05) = −2.996`, worse than any honest miss can possibly be.
-- **Bond checked at reveal, not at fill.** Bond must clear `bondFor(bucket)` (1×/2×/4×/8× base),
-  but the bucket is hidden until reveal — so confidence never leaks while the claim is still
-  being sold. Under-bond a high-confidence claim and you simply cannot reveal it; you get
-  slashed instead.
-- **Scoring against the prior snapshot taken at commit time.** `ClaimCommitted` freezes the
-  public prior as it stood at the fill. Agreeing with an obvious report earns ≈0 no matter how
-  confident you sound; a confident restatement of an obvious `OUT` scores *negative*. You are
-  paid for surprise that turns out to be right, scaled by how early you said it.
-
-## One important limitation
-
-**The oracle is a fixture file and one private key.**
-
-Everything above is genuinely trustless — commitments, escrow, slashing, settlement. None of
-it fixes the fact that `bool correct = (c.claimed == actual)` resolves through
-`inactive[gameId][playerId]`, a mapping written only by `attest`. "Wrong" is not discovered,
-it is *declared*. The `reportHash` lets anyone rehash the published snapshot in
-`out/attestations/` and prove the resolver attested that exact document — that is **integrity,
-not truth**. There is no feed to check it against, and this build makes zero external data
-calls.
-
-A production version needs a bonded multi-attester with a real challenge game, an optimistic
-oracle, or signed league feeds. The contract's shape already accommodates it: `attest` is one
-`onlyResolver` call behind a timelock, so replacing the single key with a committee is a
-resolver-side change, not a redesign.
-
-*(Runner-up limitation, documented but not fixed: a seller can deliver a well-formed key that
-decrypts to nothing. The contract cannot verify decryption. Loss is bounded to the `revealFee`
-— the `contingent` only releases on a correct **revealed** claim, and mandatory reveal forces
-the true payload public anyway — and the buyer agent blacklists that seller locally.)*
-
----
-
-## What the buyer actually gets
-
-The price splits in two, and only half is contingent on being right:
-
-| | paid at | refunded if the claim is wrong |
+| Who | Puts in | Gets out |
 |---|---|---|
-| `revealFee` | credited to seller on `deliverKey` | **No** — it buys the key, not the truth |
-| `contingent` | escrowed on `purchase` | **Yes** — returned to the buyer |
-| seller's `bond` | posted on `fillBounty` | Burned, **not** paid to the buyer |
+| **Sellers** (aggregators, forecasters) | A sealed claim per bounty, a bond scaled to their stated confidence, and a mandatory post-lock reveal | `revealFee` on key delivery, `contingent` if right, and a public reputation ledger that rewards early, contrarian, correct calls |
+| **Buyers** (DFS / betting optimizers) | Bounties with `revealFee + contingent` escrowed, and their own decryption key | Availability intel before lock, weighted by each seller's ledger; `contingent` refunded if the claim is wrong |
+| **Operator** (scheduler + attester + fee recipient, one key in this deployment) | Games, the public prior snapshot, and the attestation that settles every claim on a game | A fixed cut of each `revealFee` (`protocolFeeBps`, 2.5%), charged on the sale and never on the outcome, so it cannot profit from attesting falsely |
+| **Burn sink** | Nothing | Every forfeited bond. Bonds never reach the buyer or operator, so nobody is paid for a seller being wrong |
 
-The bond burns rather than paying the buyer on purpose: if wrong claims paid out, buying
-claims you expect to be wrong would be profitable, and the market would start pricing
-misinformation. Burning keeps the buyer's incentive pointed at wanting correct information.
+## How a claim moves
+
+**Sealing is two-step. We sell the key** At `fillBounty` the seller posts
+AES-256-GCM ciphertext under a fresh key `K` plus a `commitHash`. The ciphertext is public
+at once; `K` is withheld. After the buyer pays, `deliverKey` carries `ECIES(buyerPubKey, K)`.
+Content is fixed and publicly committed before lock, and unreadable until money moves.
+
+That commitment makes the rest enforceable:
+
+- **Lock cliff.** `fillBounty` and `purchase` revert at `lockTime`. Stale intel is unsellable by construction.
+- **Mandatory reveal.** After lock every claim is revealed, sold or not, or `slashUnrevealed`
+  burns the bond. The ledger is a complete record, not a highlight reel.
+- **Bond checked at reveal.** Bond must clear `bondFor(bucket)` (1×/2×/4×/8× base), but the
+  bucket stays hidden until reveal, so confidence never leaks while the claim is for sale.
+- **Scored against the prior at commit time.** Agreeing with an obvious report earns ≈0.
+  You are paid for surprise that turns out right, scaled by how early you said it.
+
+The price splits in two. `revealFee` buys the key and is never refunded. `contingent` is
+escrowed and returned to the buyer if the claim is wrong. The seller's bond burns rather than
+paying the buyer, so buying claims you expect to be wrong is never profitable.
+
+## Trust model
+
+The operator is centralized on the happy path, in the shape a rollup sequencer is: **trusted
+for liveness and speed, never for custody.** It is the only party that can attest, everyone
+depends on it to be fast, and it is the single biggest assumption in the design.
+
+What keeps that honest:
+
+| Failure | What stops it |
+|---|---|
+| **Operator profits from a wrong claim** | It cannot. The fee is a fixed cut of `revealFee`, charged on the sale before any outcome exists. Forfeited bonds go to the burn sink — never to the operator or the buyer. |
+| **Operator rewrites reputation** | `scheduler` (slate + priors) and `attester` (outcome) are separate roles. Scoring reads both `py` (prior) and `qy` (outcome), so one key holding both could move a seller's score two ways. |
+| **Operator attests a false list** | Publicly detectable — the inactive list is on nfl.com, and `reportHash` lets anyone rehash the published snapshot in `out/attestations/`. `settle` is timelocked behind `challengeWindow`, and `voidAttestation` can cancel inside it. ⚠️ Today only the owner can void, and owner == operator, so this is a timelock without an independent challenger. |
+| **Operator disappears** | `forceUnwind` + `unwindClaim`. After `lockTime + unwindDelay` with no attestation, **anyone** can unwind the game and every participant takes their own money back — bonds to sellers, escrow to buyers, nothing burned, nobody scored. This is the force-inclusion analogue: the operator can be slow or absent, but it can never hold funds hostage. |
+
+The remaining gap is the third row: detection is free, punishment is not yet automatic. The
+next step is an operator bond slashable by an independent challenger — either a small
+multisig of named parties, or `src/UmaAttester.sol`, which sources outcomes from UMA's
+Optimistic Oracle V3 so a bonded proposer can be disputed by anyone. Because `attester` is
+its own role, swapping it in is a redeployment of that adapter, not of the market or its
+reputation ledger.
 
 ## Scoring
 
 ```
 p0  = priorTable[priorTag][priorPractice]      # P(ACTIVE) from the public report AT COMMIT TIME
 q   = bucketMid[bucket]                        # 0.55 / 0.675 / 0.825 / 0.95
-qy  = (claimed == actual) ? q : 1 - q          # what the seller assigned to what happened
-py  = (actual == ACTIVE) ? p0 : 1 - p0         # what the public prior assigned to it
+qy  = (claimed == actual) ? q : 1 - q
+py  = (actual == ACTIVE) ? p0 : 1 - p0
 w   = 0.1 + 0.9 * min(1, hoursBeforeLock / 96) # lead-time weight
 Δ   = w * (ln(qy) - ln(py))
 ```
 
-Slashed or refunded claims score `ln(0.05)` at full weight. Scoring is **off-chain only** —
-`ClaimSettled` carries every input, so reputation is a pure fold over one event type that
-anyone can recompute. The prior table is illustrative seed constants, not measurements;
-backtest against a real season of injury reports and replace them.
-
-The gradient this produces (from `agents/src/lib/scoring.ts`, all covered by tests):
+Slashed or refunded claims score `ln(0.05) = −2.996` at full weight, worse than any honest
+miss. Scoring is off-chain: `ClaimSettled` carries every input, so anyone can recompute the
+ledger from `agents/src/lib/scoring.ts`.
 
 | claim | prior | lead time | Δ |
 |---|---|---|---|
-| late `ACTIVE/B55` on `PROBABLE/FULL`, right | 0.95 | 0h | −0.055 |
 | confident restatement of an obvious `OUT` | 0.01 | 96h | −0.041 |
 | contrarian `INACTIVE/B83` on `QUESTIONABLE/LIMITED`, right | 0.70 | 1h | +0.111 |
-| same call, 48h earlier | 0.70 | 48h | +0.556 |
 | same call, 96h earlier | 0.70 | 96h | +1.012 |
 | same call, **wrong** | 0.70 | 96h | −1.386 + burned bond |
 | never revealed | — | — | **−2.996** |
 
-## Parameters: demo vs production
-
-Every window is a constructor argument, so one contract serves both.
-
-| Parameter | Demo (deployed) | Production story | Why they differ |
-|---|---|---|---|
-| `lockTime` | `now + 110s` | kickoff − 90 min | Real lineups lock well before kickoff; the demo has to fit a video. 110s is the floor for ~25 pre-lock txs at Sepolia's ~13s confirmations. |
-| `challengeWindow` | `45s` | 24h | Time for a challenger to dispute an attestation before settlement is irreversible. A real one needs a business day. |
-| `revealWindow` | `45s` | 48h | Grace period for sellers to honour mandatory reveal before being slashed. |
-| `baseBond` | `0.0002 ETH` | economically meaningful | Bond scales `1×/2×/4×/8×` by confidence bucket. Demo value is a rounding error; production must exceed the expected profit from a wrong confident call. |
-| `burnSink` | `0x…dEaD` | protocol treasury / insurance fund | Burning is the simplest credible sink. A treasury needs governance this design doesn't have. |
-| `resolver` | deployer EOA | bonded attester committee | The limitation above. |
-| Data source | `fixtures/week1.json` | official injury report adapter | LLD §4.1 specifies `getPriors()` / `getInactives()`; not built. |
-
-## Repo layout
-
-```
-src/SealedAvailabilityMarket.sol   the only stateful component
-test/SAM.t.sol                     14 tests, incl. a TS/Solidity commit-hash cross-check
-script/Deploy.s.sol                every window is a constructor arg
-agents/src/lib/crypto.ts           AES-256-GCM + ECIES over @noble; the two-step seal
-agents/src/lib/scoring.ts          pure fold over ClaimSettled — used by agents AND the UI
-agents/src/lib/indexer.ts          rebuilds all state from getLogs; no database anywhere
-agents/src/resolver.ts             createGame / setPriorBatch / attest
-agents/src/seller-aggregator.ts    rules over beat reporting (sells lead time)
-agents/src/seller-forecaster.ts    base rates over practice trajectory (sells calibration)
-agents/src/buyer.ts                bounties, purchase, decrypt+verify, logit-pool ensemble
-agents/src/demo.ts                 the orchestrator
-```
-
-The contract is the only stateful component. Agents are stateless scripts that replay from
-`getLogs(fromBlock: deployBlock)` on startup. No database, no indexer service, no relay.
-
-## Running it
+## Running the demo
 
 ```bash
-forge test                                  # 14 contract tests
+forge test                                  # 19 contract tests
 cd agents && npm install && npm test        # 37 crypto + scoring tests
 ```
 
-For the live demo you need a funded Sepolia key:
+Copy `.env.example` to `.env` in the repo root and fill it in — it is read automatically, no
+`source` needed. Then `npm run keys` in `agents/` to generate the agent wallets, and fund the
+three printed addresses with ~0.05 Sepolia ETH each.
+
+### Interactive: three terminals (the one to record)
+
+Each terminal is a stakeholder you drive by typing commands, so you can steer the scenario
+live — sell a claim, buy it, and decide whether it turns out right or wrong.
 
 ```bash
-cp .env.example .env        # add PRIVATE_KEY and SEPOLIA_RPC_URL
-cd agents
-npm install
-npm run keys                # generates .agent-keys.json (gitignored, mode 0600)
-# fund the three printed addresses with ~0.05 Sepolia ETH each
-npm run demo
+npm run operator                    # terminal 1 — the manager
+npm run seller                      # terminal 2 — aggregator (scrapes local reporting)
+npm run buyer                       # terminal 3 — lineup optimizer
+SELLER=forecaster npm run seller    # optional — the model seller
 ```
 
-`.env` is read automatically from the repo root — no `source` needed. An already-exported
-shell variable always takes precedence over the file.
+A full scenario:
 
-`npm run demo` is self-contained and re-runnable: it advances to a fresh synthetic week if the
-current one is already used on-chain, and scopes settlement and the ledger to its own run.
+| Terminal | Command | What it shows |
+|---|---|---|
+| operator | `open` | publishes the slate and the public injury report |
+| buyer | `bounty` | posts a bounty per uncertain slot |
+| seller | `scan` | what the wires say, and what it implies |
+| seller | `sell cmc` | fills with a **sealed** claim — content hidden, bond posted |
+| seller | `sell dk INACTIVE B83` | override the strategy and claim by hand |
+| buyer | `offers` | sees ciphertext byte counts and seller reputation — *not* content |
+| buyer | `buy 7` | pays; still cannot read it |
+| seller | `deliver` | sends `ECIES(buyerPubKey, K)` — **this** is the sale |
+| buyer | `open` then `decide` | decrypts, verifies against the commitment, ensembles into START/BENCH |
+| seller | `sell kelce ...` | after lock: `LOCKED 4s ago — fills revert at the cliff` |
+| operator | `attest SEA@SF cmc` | **manual override** — you declare who was inactive |
+| seller | `hold 9` then `reveal` | refuse one reveal; that claim gets slashed |
+| operator | `settle`, `slash`, `fees` | settles, burns forfeited bonds, collects the take |
+
+`attest <game> [slugs...]` is the manual override: whatever you type becomes ground truth,
+which is how you make a seller right or wrong on camera. `oracle <game>` attests from the
+fixture feed instead. `unwind <game>` demonstrates the escape hatch. Every terminal has
+`status` and `help`.
+
+### Autonomous
+
+`npm run demo` runs the whole lifecycle as one orchestrated process (~4m40s). The four
+stakeholders can also run as independent daemons — `auto:manager`, `auto:scraper`,
+`auto:forecaster`, `auto:buyer` — sharing no state and coordinating only through `getLogs`.
+Each derives `t0` from the chain (the game's on-chain `lockTime` minus the lock offset), so
+processes started at different moments still agree on what has broken.
+
+Every demo is re-runnable: `open` advances to a fresh synthetic week, since `gameId` is
+deterministic from `(season, week, teams)`.
 
 ## Known gaps
 
-- **Web UI not built.** LLD §5 specifies read-only routes over `getLogs`; `agents/src/lib/indexer.ts`
-  is written to be shared with it, but the Next.js app was the first cut line.
-- **LLM seller mode not built.** `seller-aggregator.ts` ships the rules implementation that
-  §4.2 specifies as the fallback; the Claude-backed variant was a documented cut line.
-- **No live data adapter.** See the limitation above.
-- **Contract is unverified on Etherscan** — deployed without an `ETHERSCAN_API_KEY`. The ABI
-  is in `agents/src/lib/abi.ts` and `forge verify-contract` will work retroactively.
-- **Non-exclusive tips.** A seller can fill many bounties with the same claim; each carries its
-  own bond, so the cost scales, but exclusivity is not enforced.
+- **No live data adapter.** The oracle is a fixture file and one key (see Trust model).
+- **Web UI and LLM seller mode not built.** `indexer.ts` is written to be shared with a UI.
+- **A seller can deliver a key that decrypts to nothing.** Loss is bounded to `revealFee`;
+  the buyer agent blacklists that seller locally.
+- **Non-exclusive tips.** A seller can fill many bounties with one claim; each carries its own bond.
+- **Contract unverified on Etherscan.** ABI is in `agents/src/lib/abi.ts`; `forge verify-contract` works retroactively.

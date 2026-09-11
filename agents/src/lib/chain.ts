@@ -30,14 +30,14 @@ export { SAM_ABI };
  * Deployed on Ethereum Sepolia, NOT Base Sepolia as the LLD assumed (A1): Base faucets
  * were dry, so the fallback chain in A1 was taken.
  */
-export const CONTRACT_ADDRESS: Address = '0xF82a25dd634Ea459597F41b13A290CFe7F360452';
+export const CONTRACT_ADDRESS: Address = '0x303B63C53cB0ce16b6DbD0a74040E66090156793';
 
 /**
  * The block the contract was mined in. Taken from the broadcast receipt, not from the
  * script's console.log — that one runs during simulation and is one block early, which
  * would make getLogs miss the deployment block.
  */
-export const DEPLOY_BLOCK = 11680684n;
+export const DEPLOY_BLOCK = 11680855n;
 
 export const CHAIN = sepolia;
 export const EXPLORER = `https://sepolia.etherscan.io/address/${CONTRACT_ADDRESS}`;
