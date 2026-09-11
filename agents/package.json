@@ -7,13 +7,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "abi": "node scripts/gen-abi.mjs",
-    "buyer": "tsx src/run/buyer.ts",
     "demo": "tsx src/demo.ts",
     "keys": "tsx scripts/gen-keys.ts",
-    "manager": "tsx src/run/manager.ts",
-    "scraper": "tsx src/run/scraper.ts",
-    "forecaster": "tsx src/run/forecaster.ts",
-    "sellers": "tsx src/run/scraper.ts & tsx src/run/forecaster.ts"
+    "auto:manager": "tsx src/run/manager.ts",
+    "auto:scraper": "tsx src/run/scraper.ts",
+    "auto:forecaster": "tsx src/run/forecaster.ts",
+    "auto:buyer": "tsx src/run/buyer.ts",
+    "operator": "tsx src/cli/operator.ts",
+    "seller": "tsx src/cli/seller.ts",
+    "buyer": "tsx src/cli/buyer.ts"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.1",

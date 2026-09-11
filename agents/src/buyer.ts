@@ -128,6 +128,29 @@ export class Buyer {
     throw new Error('BountyPosted not found in receipt');
   }
 
+  /** Re-attach a bounty discovered from logs (the CLI restarts between commands). */
+  adoptBounty(bountyId: number, gameId: Hex, playerId: Hex, player: ResolvedPlayer) {
+    if (!this.bounties.has(bountyId)) this.bounties.set(bountyId, { gameId, playerId, player });
+  }
+
+  /** Buy one specific claim, for the interactive terminal. */
+  async purchaseOne(state: MarketState, claimId: number) {
+    const c = state.claims.get(claimId);
+    if (!c) throw new Error(`no claim #${claimId}`);
+    if (c.purchased) throw new Error(`claim #${claimId} is already sold`);
+    const b = state.bounties.get(c.bountyId);
+    if (!b) throw new Error(`claim #${claimId} has no bounty`);
+    if (b.buyer.toLowerCase() !== this.address.toLowerCase()) throw new Error('not your bounty');
+
+    const { hash } = await send(this.pub, this.wallet, {
+      functionName: 'purchase',
+      args: [BigInt(claimId)],
+      value: b.revealFee + b.contingent,
+    });
+    this.purchased.add(claimId);
+    act('BUYER', `purchase claim#${claimId} from ${short(c.seller)} — content still sealed`, hash);
+  }
+
   bountyIds(): number[] {
     return [...this.bounties.keys()];
   }

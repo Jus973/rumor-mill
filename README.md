@@ -11,11 +11,15 @@ Buyers are those who will use this information for personal benefit
 - Fantasy football agents (lineup optimizers)
 - Prediction market agents (trying to bet before the curve)
 
+### Features: 
+- Sellers are paid on outcome, and post a bond that burns if they're wrong. 
+- Reputation is earned for being right early and against the public report.
+- Contracts are locked at lineup lock (90 minutes before an actual game)
+- Price is compared to oracle-driven truth values; there is a surprise factor that incentivizes sellers to give nicher information
+- 
 
 
-Reputation is earned for being right *early* and
-*against the public report*, and it cannot be cherry-picked: every claim a seller commits is
-revealed after lock or forfeits its bond.
+
 
 | | |
 |---|---|

@@ -24,6 +24,7 @@ export interface IndexedGame {
   reportHash?: Hex;
   inactivePlayerIds: Hex[];
   voided: boolean;
+  unwound: boolean;
 }
 
 export interface IndexedBounty {
@@ -124,6 +125,7 @@ export async function indexMarket(
           attested: false,
           inactivePlayerIds: [],
           voided: false,
+          unwound: false,
         });
         break;
 
@@ -191,6 +193,18 @@ export async function indexMarket(
           g.reportHash = a.reportHash;
           g.inactivePlayerIds = [...(a.inactivePlayerIds as unknown as Hex[])];
         }
+        break;
+      }
+
+      case 'GameUnwound': {
+        const g = state.games.get(a.gameId);
+        if (g) g.unwound = true;
+        break;
+      }
+
+      case 'ClaimUnwound': {
+        const c = state.claims.get(Number(a.claimId));
+        if (c) c.refunded = true; // terminal, funds returned, nobody scored
         break;
       }
 
