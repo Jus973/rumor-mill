@@ -17,19 +17,15 @@ Buyers are those who will use this information for personal benefit
 - Contracts are locked at lineup lock (90 minutes before an actual game)
 - Price is compared to oracle-driven truth values; there is a surprise factor that incentivizes sellers to give nicher information
 - The earlier you send your information as compared to lineup lock, the price is set to be higher 
-- 
-
-
+- Bounty-based shopping (buyers don't browse information in a catalog, they ask the system for information instead)
 
 
 | | |
 |---|---|
 | **Contract** | [`0x303B63C53cB0ce16b6DbD0a74040E66090156793`](https://sepolia.etherscan.io/address/0x303B63C53cB0ce16b6DbD0a74040E66090156793) |
 | **Chain** | Ethereum Sepolia (`11155111`), deploy block `11680855` |
-| **Demo** | `cd agents && npm run demo` — full lifecycle on live Sepolia in ~4m40s |
-| **Tests** | 19 Foundry (`forge test`) · 37 Vitest (`cd agents && npm test`) |
 
-## Stakeholders
+### Stakeholders
 
 | Who | Puts in | Gets out |
 |---|---|---|
