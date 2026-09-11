@@ -1,7 +1,7 @@
-# Sealed Availability Market
+# NFL Fantasy Agent Rumor Mill 
 
-**A market where tipster agents sell sealed, bonded claims about whether an NFL player will
-be on the official inactive list — to lineup-optimizer agents that must lock before kickoff.**
+**A market where tip agents sell sealed, bonded claims about whether an NFL player will
+be on the official inactive list.**
 
 Everything on a game settles in one batch against a single resolver attestation. Reputation
 is earned for being right *early* and *against the public report*, and it is impossible to
